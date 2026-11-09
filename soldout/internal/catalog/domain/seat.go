@@ -24,11 +24,12 @@ type Seat struct {
 	VenueID  uuid.UUID
 	RowNo    int
 	SeatNo   int
+	Pricing  api.SectorPricing
 }
 
 // ToAPI — DTO.
 func (s Seat) ToAPI() api.Seat {
-	return api.Seat{ID: s.ID, SectorID: s.SectorID, VenueID: s.VenueID, RowNo: s.RowNo, SeatNo: s.SeatNo}
+	return api.Seat{ID: s.ID, SectorID: s.SectorID, VenueID: s.VenueID, RowNo: s.RowNo, SeatNo: s.SeatNo, Pricing: s.Pricing}
 }
 
 // SeatState — строка проекции: место сектора со статусом held/sold.

@@ -96,9 +96,12 @@ func (q *queries) SeatSold(ctx context.Context, eventID uuid.UUID, seatID int64)
 // InsertHold — новый hold; нарушение uniq_active_hold / holds_taken_uidx → ErrSeatHeld.
 func (q *queries) InsertHold(ctx context.Context, h domain.Hold) error {
 	_, err := q.db.Exec(ctx, `/* booking.insert_hold */
-		INSERT INTO holds (id, event_id, seat_id, user_id, status, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		h.ID, h.EventID, h.SeatID, h.UserID, h.Status, h.ExpiresAt, h.CreatedAt)
+		INSERT INTO holds (id, event_id, sector_id, seat_id, user_id, status, price_sequence, price_minor, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		h.ID, h.EventID, h.SectorID, h.SeatID, h.UserID, h.Status, h.PriceSequence, h.PriceMinor, h.ExpiresAt, h.CreatedAt)
+	if db.IsUniqueViolation(err, "holds_sector_price_sequence_uidx") {
+		return fmt.Errorf("booking/pg: номер цены уже сохранён, счётчик Valkey рассинхронизирован: %w", err)
+	}
 	if db.IsUniqueViolation(err, "") {
 		return api.ErrSeatHeld
 	}
@@ -108,11 +111,11 @@ func (q *queries) InsertHold(ctx context.Context, h domain.Hold) error {
 	return nil
 }
 
-const holdCols = "id, event_id, seat_id, user_id, status, expires_at, created_at"
+const holdCols = "id, event_id, sector_id, seat_id, user_id, status, price_sequence, price_minor, expires_at, created_at"
 
 func scanHold(row pgx.Row) (domain.Hold, error) {
 	var h domain.Hold
-	err := row.Scan(&h.ID, &h.EventID, &h.SeatID, &h.UserID, &h.Status, &h.ExpiresAt, &h.CreatedAt)
+	err := row.Scan(&h.ID, &h.EventID, &h.SectorID, &h.SeatID, &h.UserID, &h.Status, &h.PriceSequence, &h.PriceMinor, &h.ExpiresAt, &h.CreatedAt)
 	return h, err
 }
 

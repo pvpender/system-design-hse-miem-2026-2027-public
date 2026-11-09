@@ -46,13 +46,21 @@ type Event struct {
 	SalesState  SalesState `json:"sales_state"`
 }
 
+// SectorPricing — настройки динамической цены сектора.
+type SectorPricing struct {
+	BasePriceMinor  int64 `json:"base_price_minor"`
+	IncreasePercent int   `json:"price_increase_percent"`
+	StepSize        int64 `json:"price_step_size"`
+}
+
 // Seat — место; VenueID нужен booking, чтобы проверить принадлежность места мероприятию.
 type Seat struct {
-	ID       int64     `json:"id"`
-	SectorID uuid.UUID `json:"sector_id"`
-	VenueID  uuid.UUID `json:"venue_id"`
-	RowNo    int       `json:"row"`
-	SeatNo   int       `json:"num"`
+	ID       int64         `json:"id"`
+	SectorID uuid.UUID     `json:"sector_id"`
+	VenueID  uuid.UUID     `json:"venue_id"`
+	RowNo    int           `json:"row"`
+	SeatNo   int           `json:"num"`
+	Pricing  SectorPricing `json:"pricing"`
 }
 
 // SeatMap — сводка карты зала по секторам (с занятия 2 полная карта не отдаётся: см. SectorSeatMap).

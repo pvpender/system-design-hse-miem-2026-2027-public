@@ -59,12 +59,17 @@ type ReleasedHold struct {
 	SeatID  int64
 }
 
+// PriceReserver — атомарно выделяет номер и цену в секторе (Valkey, ADR-101-V2).
+type PriceReserver interface {
+	ReservePrice(ctx context.Context, sectorID uuid.UUID, basePriceMinor int64, increasePercent int, stepSize int64) (domain.PriceReservation, error)
+}
+
 // Options — настройки сервиса.
 type Options struct {
-	HoldTTL          time.Duration
-	TicketPriceMinor int64
-	Faults           faults.Flags
-	Events           eventbus.Publisher // события SeatStateChanged после commit; nil = не публиковать
+	HoldTTL time.Duration
+	Pricing PriceReserver
+	Faults  faults.Flags
+	Events  eventbus.Publisher // события SeatStateChanged после commit; nil = не публиковать
 }
 
 // Service — реализация api.Service.
@@ -118,7 +123,17 @@ func (s *Service) CreateHold(ctx context.Context, in api.CreateHoldInput) (api.H
 		return api.Hold{}, err
 	}
 
-	hold := domain.NewHold(in.EventID, in.SeatID, in.UserID, s.now(), s.opts.HoldTTL)
+	if _, err := domain.PriceForSequence(seat.Pricing.BasePriceMinor, seat.Pricing.IncreasePercent, seat.Pricing.StepSize, 1); err != nil {
+		return api.Hold{}, err
+	}
+	if s.opts.Pricing == nil {
+		return api.Hold{}, errors.New("booking: калькулятор цены не настроен")
+	}
+	reservation, err := s.opts.Pricing.ReservePrice(ctx, seat.SectorID, seat.Pricing.BasePriceMinor, seat.Pricing.IncreasePercent, seat.Pricing.StepSize)
+	if err != nil {
+		return api.Hold{}, err
+	}
+	hold := domain.NewHold(in.EventID, seat.SectorID, in.SeatID, in.UserID, reservation, s.now(), s.opts.HoldTTL)
 	err = s.store.InTx(ctx, func(tx Tx) error {
 		// Сериализуем конкурентов на одно место. На L1 — без try-lock: очередь на «горячем» месте (см. занятие 2).
 		if err := tx.LockSeat(ctx, in.EventID, in.SeatID); err != nil {
@@ -212,7 +227,7 @@ func (s *Service) CreateOrder(ctx context.Context, in api.CreateOrderInput) (api
 		if len(holds) != len(uniqueIDs(in.HoldIDs)) {
 			return api.ErrHoldNotFound
 		}
-		order, err = domain.NewOrder(holds, in.UserID, in.IdempotencyKey, s.opts.TicketPriceMinor, s.now())
+		order, err = domain.NewOrder(holds, in.UserID, in.IdempotencyKey, s.now())
 		if err != nil {
 			return err
 		}

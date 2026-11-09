@@ -31,10 +31,10 @@ BEGIN
             sector_id := ('30000000-0000-4000-8000-' || lpad(to_hex(ev * 1000 + sec), 12, '0'))::uuid;
             base := (ev - 1)::bigint * n_seats + (sec - 1)::bigint * 1000;
             kind := CASE WHEN sec > n_sectors - 2 THEN 'standing' ELSE 'seated' END;
-            INSERT INTO sectors (id, venue_id, name, kind, capacity)
+            INSERT INTO sectors (id, venue_id, name, kind, capacity, base_price_minor, price_increase_percent, price_step_size)
             VALUES (sector_id, venue_id,
                     CASE WHEN kind = 'standing' THEN 'Танцпол ' || (sec - (n_sectors - 2)) ELSE 'Сектор ' || sec END,
-                    kind, 1000);
+                    kind, 1000, 500000, 10, 100);
             IF kind = 'seated' THEN
                 INSERT INTO seats (id, sector_id, row_no, seat_no)
                 SELECT base + (r - 1) * 50 + s, sector_id, r, s

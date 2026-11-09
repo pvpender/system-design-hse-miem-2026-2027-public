@@ -61,13 +61,15 @@ func (r *Repo) GetEvent(ctx context.Context, id uuid.UUID) (domain.Event, error)
 	return scanEvent(r.db.QueryRow(ctx, "/* catalog.get_event */ SELECT "+eventCols+" FROM events WHERE id = $1", id))
 }
 
-// GetSeat — место с площадкой (через сектор).
+// GetSeat — место с площадкой и настройками цены сектора.
 func (r *Repo) GetSeat(ctx context.Context, id int64) (domain.Seat, error) {
 	var s domain.Seat
 	err := r.db.QueryRow(ctx, `/* catalog.get_seat */
-		SELECT s.id, s.sector_id, sec.venue_id, s.row_no, s.seat_no
+		SELECT s.id, s.sector_id, sec.venue_id, s.row_no, s.seat_no,
+		       sec.base_price_minor, sec.price_increase_percent, sec.price_step_size
 		FROM seats s JOIN sectors sec ON sec.id = s.sector_id
-		WHERE s.id = $1`, id).Scan(&s.ID, &s.SectorID, &s.VenueID, &s.RowNo, &s.SeatNo)
+		WHERE s.id = $1`, id).Scan(&s.ID, &s.SectorID, &s.VenueID, &s.RowNo, &s.SeatNo,
+		&s.Pricing.BasePriceMinor, &s.Pricing.IncreasePercent, &s.Pricing.StepSize)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return s, api.ErrSeatNotFound
 	}

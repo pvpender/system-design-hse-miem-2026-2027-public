@@ -83,7 +83,7 @@ deps:
   queue_internal:   { mayDependOn: [queue_internal, queue_api, platform, catalog_api], canUse: [chi, pgx, valkey] }
 
   booking_api:      { mayDependOn: [platform] }
-  booking_internal: { mayDependOn: [booking_internal, booking_api, platform, catalog_api, queue_api], canUse: [chi, pgx] }
+  booking_internal: { mayDependOn: [booking_internal, booking_api, platform, catalog_api, queue_api], canUse: [chi, pgx, valkey] }
 
   payment_api:      { mayDependOn: [platform] }
   payment_internal: { mayDependOn: [payment_internal, payment_api, platform, booking_api], canUse: [pgx] }

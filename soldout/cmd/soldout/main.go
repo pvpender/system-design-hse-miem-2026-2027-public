@@ -19,6 +19,7 @@ import (
 
 	bookinghttp "github.com/nikolaysavelev/soldout/internal/booking/adapters/http"
 	bookingpg "github.com/nikolaysavelev/soldout/internal/booking/adapters/pg"
+	bookingvalkey "github.com/nikolaysavelev/soldout/internal/booking/adapters/valkey"
 	bookingapi "github.com/nikolaysavelev/soldout/internal/booking/api"
 	bookingapp "github.com/nikolaysavelev/soldout/internal/booking/app"
 	cataloghttp "github.com/nikolaysavelev/soldout/internal/catalog/adapters/http"
@@ -142,7 +143,7 @@ func run() error {
 	// notification с занятия 4 — отдельный сервис cmd/notifier (событие OrderPaidEvent), в монолите его нет
 	ticketingSvc := ticketingapp.New(ticketingpg.New(pool), logger)
 	bookingSvc := bookingapp.New(bookingStore, catalogSvc, queueSvc, paymentSvc, ticketingSvc,
-		bookingapp.Options{HoldTTL: cfg.HoldTTL, TicketPriceMinor: cfg.TicketPriceMinor, Faults: flags, Events: bus}, logger)
+		bookingapp.Options{HoldTTL: cfg.HoldTTL, Pricing: bookingvalkey.New(vk), Faults: flags, Events: bus}, logger)
 
 	// --- HTTP ---
 	r := chi.NewRouter()
