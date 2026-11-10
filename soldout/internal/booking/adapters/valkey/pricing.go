@@ -5,19 +5,26 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	vk "github.com/valkey-io/valkey-go"
 
+	"github.com/nikolaysavelev/soldout/internal/booking/api"
 	"github.com/nikolaysavelev/soldout/internal/booking/app"
 	"github.com/nikolaysavelev/soldout/internal/booking/domain"
 	"github.com/nikolaysavelev/soldout/internal/platform/otel"
 )
 
+const priceOverflowMessage = "цена превышает допустимый диапазон"
+
 const reservePriceScript = `
 local sequence = redis.call('INCR', KEYS[1])
 local level = math.floor((sequence - 1) / tonumber(ARGV[3]))
 local price = math.floor(tonumber(ARGV[1]) * math.pow(1 + tonumber(ARGV[2]) / 100, level) + 0.5)
+if price >= 9223372036854775807 then
+    return redis.error_reply('` + priceOverflowMessage + `')
+end
 return {sequence, price}`
 
 // Pricer — реализация app.PriceReserver через один Lua-вызов Valkey.
@@ -43,6 +50,9 @@ func (p *Pricer) ReservePrice(ctx context.Context, sectorID uuid.UUID, basePrice
 		strconv.FormatInt(basePriceMinor, 10), strconv.Itoa(increasePercent), strconv.FormatInt(stepSize, 10),
 	})
 	if err := result.Error(); err != nil {
+		if strings.Contains(err.Error(), priceOverflowMessage) {
+			return reservation, fmt.Errorf("booking/valkey: reserve price: %w", api.ErrPriceOverflow)
+		}
 		return reservation, fmt.Errorf("booking/valkey: reserve price: %w", err)
 	}
 	values, err := result.ToArray()
@@ -53,9 +63,15 @@ func (p *Pricer) ReservePrice(ctx context.Context, sectorID uuid.UUID, basePrice
 	if err != nil {
 		return reservation, fmt.Errorf("booking/valkey: price sequence: %w", err)
 	}
+	if sequence <= 0 {
+		return reservation, fmt.Errorf("booking/valkey: некорректный номер цены %d", sequence)
+	}
 	price, err := values[1].ToInt64()
 	if err != nil {
 		return reservation, fmt.Errorf("booking/valkey: reserved price: %w", err)
+	}
+	if price <= 0 {
+		return reservation, fmt.Errorf("booking/valkey: некорректная зарезервированная цена %d", price)
 	}
 	return domain.PriceReservation{Sequence: sequence, PriceMinor: price}, nil
 }

@@ -2,6 +2,8 @@ package valkey
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/nikolaysavelev/soldout/internal/booking/api"
 	"github.com/nikolaysavelev/soldout/internal/booking/domain"
 	"github.com/nikolaysavelev/soldout/internal/platform/cache"
 )
@@ -76,6 +79,23 @@ func TestReservePrice_ConcurrentAtomicSequence(t *testing.T) {
 	for sequence := int64(1); sequence <= workers; sequence++ {
 		if seen[sequence] != 1 {
 			t.Errorf("номер %d выделен %d раз", sequence, seen[sequence])
+		}
+	}
+
+	// При переполнении int64 Lua не должна отдавать MinInt64 в PostgreSQL.
+	for _, overflowSequence := range []int64{32301, 40259} {
+		if _, err := domain.PriceForSequence(500000, 10, 100, overflowSequence); err == nil {
+			t.Fatalf("тестовый номер %d должен вызывать переполнение цены", overflowSequence)
+		}
+		if err := client.Do(ctx, client.B().Set().Key(key(sectorID)).Value(strconv.FormatInt(overflowSequence-1, 10)).Build()).Error(); err != nil {
+			t.Fatalf("установить счётчик перед переполнением: %v", err)
+		}
+		reservation, err := pricer.ReservePrice(ctx, sectorID, 500000, 10, 100)
+		if err == nil {
+			t.Fatalf("переполнение цены на номере %d должно возвращать ошибку, получено %+v", overflowSequence, reservation)
+		}
+		if !errors.Is(err, api.ErrPriceOverflow) {
+			t.Fatalf("переполнение цены на номере %d должно быть ErrPriceOverflow: %v", overflowSequence, err)
 		}
 	}
 

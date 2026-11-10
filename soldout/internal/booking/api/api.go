@@ -155,6 +155,7 @@ var (
 	ErrPaymentFailed       = errors.New("booking: оплата отклонена")
 	ErrIdempotencyConflict = errors.New("booking: Idempotency-Key уже использован с другими параметрами")
 	ErrValidation          = errors.New("booking: некорректные данные")
+	ErrPriceOverflow       = errors.New("booking: цена превышает допустимый диапазон")
 	ErrAdmissionRequired   = errors.New("booking: нужен действующий токен допуска (X-Admission-Token)")
 )
 
