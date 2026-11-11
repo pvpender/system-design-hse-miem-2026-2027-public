@@ -45,6 +45,7 @@ type SeatStateChange struct {
 	EventID   uuid.UUID      `json:"event_id"`
 	SeatID    int64          `json:"seat_id"`
 	State     api.SeatStatus `json:"state"`
+	HoldID    uuid.UUID      `json:"hold_id"`
 }
 
 // SectorVersion — текущая версия сектора после batch (нужна и при повторной инвалидации).

@@ -259,7 +259,7 @@ func (s *Service) HandleSeatStateBatch(ctx context.Context, records []outbox.Rec
 			return fmt.Errorf("catalog: неизвестное состояние места %q", ev.State)
 		}
 		changes = append(changes, domain.SeatStateChange{
-			ID: r.ID, SourceSeq: r.Seq, EventID: ev.EventID, SeatID: ev.SeatID, State: state,
+			ID: r.ID, SourceSeq: r.Seq, EventID: ev.EventID, SeatID: ev.SeatID, State: state, HoldID: ev.HoldID,
 		})
 	}
 	versions, err := s.repo.ApplySeatStates(ctx, changes)

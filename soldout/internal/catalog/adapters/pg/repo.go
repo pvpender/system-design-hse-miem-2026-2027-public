@@ -231,7 +231,7 @@ func (r *Repo) ApplySeatStates(ctx context.Context, changes []domain.SeatStateCh
 	rows, err := r.pool.Query(ctx, `/* catalog.apply_seat_state_batch */
 		WITH input AS (
 			SELECT * FROM jsonb_to_recordset($1::jsonb)
-			AS x(id uuid, source_seq bigint, event_id uuid, seat_id bigint, state text)
+			AS x(id uuid, source_seq bigint, event_id uuid, seat_id bigint, state text, hold_id uuid)
 		),
 		inserted AS (
 			INSERT INTO catalog_processed_events(id) SELECT id FROM input ON CONFLICT DO NOTHING RETURNING id
@@ -269,15 +269,17 @@ func (r *Repo) ApplySeatStates(ctx context.Context, changes []domain.SeatStateCh
 		deleted AS (
 			DELETE FROM catalog_seat_state c USING changed ch
 			WHERE c.event_id = ch.event_id AND c.seat_id = ch.seat_id AND ch.state = 'free'
+				AND c.state = 'held' AND (c.hold_id = ch.hold_id OR c.hold_id IS NULL)
 			RETURNING c.event_id, c.seat_id
 		),
 		upserted AS (
-			INSERT INTO catalog_seat_state(event_id, seat_id, sector_id, state, version, updated_at)
-			SELECT ch.event_id, ch.seat_id, ch.sector_id, ch.state, b.version, now()
+			INSERT INTO catalog_seat_state(event_id, seat_id, sector_id, state, version, hold_id, updated_at)
+			SELECT ch.event_id, ch.seat_id, ch.sector_id, ch.state, b.version, ch.hold_id, now()
 			FROM changed ch JOIN bumped b USING (event_id, sector_id)
 			WHERE ch.state IN ('held', 'sold')
 			ON CONFLICT (event_id, seat_id) DO UPDATE
-			SET state = EXCLUDED.state, version = EXCLUDED.version, updated_at = now()
+			SET state = EXCLUDED.state, version = EXCLUDED.version, hold_id = EXCLUDED.hold_id, updated_at = now()
+			WHERE EXCLUDED.state = 'sold' OR catalog_seat_state.state <> 'sold'
 			RETURNING event_id, seat_id
 		),
 		all_resolved AS (
