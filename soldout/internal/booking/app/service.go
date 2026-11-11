@@ -16,7 +16,6 @@ import (
 	"github.com/nikolaysavelev/soldout/internal/booking/api"
 	"github.com/nikolaysavelev/soldout/internal/booking/domain"
 	catalogapi "github.com/nikolaysavelev/soldout/internal/catalog/api"
-	"github.com/nikolaysavelev/soldout/internal/platform/eventbus"
 	"github.com/nikolaysavelev/soldout/internal/platform/faults"
 	"github.com/nikolaysavelev/soldout/internal/platform/otel"
 	queueapi "github.com/nikolaysavelev/soldout/internal/queue/api"
@@ -36,6 +35,7 @@ type Tx interface {
 	UpdateOrder(ctx context.Context, o domain.Order) error
 	// AppendOutbox — событие в outbox в этой же транзакции (занятие 4): commit публикует, rollback отменяет.
 	AppendOutbox(ctx context.Context, e api.OrderPaidEvent) error
+	AppendSeatStateOutbox(ctx context.Context, e api.SeatStateChanged) error
 }
 
 // Store — хранилище booking (реализация в adapters/pg).
@@ -69,7 +69,6 @@ type Options struct {
 	HoldTTL time.Duration
 	Pricing PriceReserver
 	Faults  faults.Flags
-	Events  eventbus.Publisher // события SeatStateChanged после commit; nil = не публиковать
 }
 
 // Service — реализация api.Service.
@@ -88,9 +87,6 @@ type Service struct {
 func New(store Store, catalog catalogapi.Service, queue queueapi.Service, payment api.PaymentGateway, tickets api.TicketIssuer, opts Options, logger *slog.Logger) *Service {
 	if opts.HoldTTL <= 0 {
 		opts.HoldTTL = 10 * time.Minute
-	}
-	if opts.Events == nil {
-		opts.Events = eventbus.Nop{}
 	}
 	return &Service{store: store, catalog: catalog, queue: queue, payment: payment, tickets: tickets, opts: opts, logger: logger, now: time.Now}
 }
@@ -153,23 +149,26 @@ func (s *Service) CreateHold(ctx context.Context, in api.CreateHoldInput) (api.H
 		if sold {
 			return api.ErrSeatSold
 		}
-		return tx.InsertHold(ctx, hold) // I1: uniq_active_hold → ErrSeatHeld
+		if err := tx.InsertHold(ctx, hold); err != nil { // I1: uniq_active_hold → ErrSeatHeld
+			return err
+		}
+		return s.appendSeatState(ctx, tx, hold.EventID, hold.SeatID, api.SeatStateHeld, hold.ID)
 	})
 	if err != nil {
 		return api.Hold{}, err
 	}
-	s.publishSeat(ctx, hold.EventID, hold.SeatID, api.SeatStateHeld, hold.ID)
 	return hold.ToAPI(), nil
 }
 
-// publishSeat публикует SeatStateChanged после commit (карта зала — проекция в catalog).
-func (s *Service) publishSeat(ctx context.Context, eventID uuid.UUID, seatID int64, state api.SeatState, holdID uuid.UUID) {
-	_ = s.opts.Events.Publish(ctx, api.SeatStateChanged{EventID: eventID, SeatID: seatID, State: state, HoldID: holdID, At: s.now()})
+// appendSeatState пишет событие проекции в той же транзакции, что и изменение hold.
+func (s *Service) appendSeatState(ctx context.Context, tx Tx, eventID uuid.UUID, seatID int64, state api.SeatState, holdID uuid.UUID) error {
+	return tx.AppendSeatStateOutbox(ctx, api.SeatStateChanged{
+		ID: uuid.New(), EventID: eventID, SeatID: seatID, State: state, HoldID: holdID, At: s.now(),
+	})
 }
 
 // ReleaseHold — DELETE /v1/holds/{id}.
 func (s *Service) ReleaseHold(ctx context.Context, holdID uuid.UUID) error {
-	var released domain.Hold
 	err := s.store.InTx(ctx, func(tx Tx) error {
 		holds, err := tx.GetHoldsForUpdate(ctx, []uuid.UUID{holdID})
 		if err != nil {
@@ -182,13 +181,14 @@ func (s *Service) ReleaseHold(ctx context.Context, holdID uuid.UUID) error {
 		if err := h.Release(); err != nil {
 			return err
 		}
-		released = h
-		return tx.UpdateHold(ctx, h)
+		if err := tx.UpdateHold(ctx, h); err != nil {
+			return err
+		}
+		return s.appendSeatState(ctx, tx, h.EventID, h.SeatID, api.SeatStateFree, h.ID)
 	})
 	if err != nil {
 		return err
 	}
-	s.publishSeat(ctx, released.EventID, released.SeatID, api.SeatStateFree, released.ID)
 	return nil
 }
 
@@ -316,7 +316,6 @@ func (s *Service) payOrder(ctx context.Context, in api.PayOrderInput) (api.Order
 	now = s.now()
 	if !res.Succeeded {
 		// FR-4: при неудаче hold снимается
-		var freed []domain.Hold
 		err = s.store.InTx(ctx, func(tx Tx) error {
 			o, err := tx.GetOrderForUpdate(ctx, order.ID)
 			if err != nil {
@@ -343,7 +342,9 @@ func (s *Service) payOrder(ctx context.Context, in api.PayOrderInput) (api.Order
 					if err := tx.UpdateHold(ctx, holds[i]); err != nil {
 						return err
 					}
-					freed = append(freed, holds[i])
+					if err := s.appendSeatState(ctx, tx, holds[i].EventID, holds[i].SeatID, api.SeatStateFree, holds[i].ID); err != nil {
+						return err
+					}
 				}
 			}
 			return nil
@@ -351,15 +352,11 @@ func (s *Service) payOrder(ctx context.Context, in api.PayOrderInput) (api.Order
 		if err != nil {
 			return api.Order{}, err
 		}
-		for _, h := range freed {
-			s.publishSeat(ctx, h.EventID, h.SeatID, api.SeatStateFree, h.ID)
-		}
 		return api.Order{}, fmt.Errorf("%w: %s", api.ErrPaymentFailed, res.Reason)
 	}
 
 	// 3. подтверждаем hold'ы и заказ в одной транзакции
 	var paid domain.Order
-	var confirmed []domain.Hold
 	err = s.store.InTx(ctx, func(tx Tx) error {
 		o, err := tx.GetOrderForUpdate(ctx, order.ID)
 		if err != nil {
@@ -388,7 +385,9 @@ func (s *Service) payOrder(ctx context.Context, in api.PayOrderInput) (api.Order
 			if err := tx.UpdateHold(ctx, holds[i]); err != nil {
 				return err
 			}
-			confirmed = append(confirmed, holds[i])
+			if err := s.appendSeatState(ctx, tx, holds[i].EventID, holds[i].SeatID, api.SeatStateSold, holds[i].ID); err != nil {
+				return err
+			}
 		}
 		if err := o.MarkPaid(now); err != nil {
 			return err
@@ -408,9 +407,6 @@ func (s *Service) payOrder(ctx context.Context, in api.PayOrderInput) (api.Order
 	})
 	if err != nil {
 		return api.Order{}, err
-	}
-	for _, h := range confirmed {
-		s.publishSeat(ctx, h.EventID, h.SeatID, api.SeatStateSold, h.ID)
 	}
 	s.opts.Faults.MaybeCrashAfterCommit(s.logger, "order.paid")
 

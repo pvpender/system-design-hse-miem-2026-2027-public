@@ -1,4 +1,4 @@
-// Package valkey — кэш токенов допуска: ключ admission:{token}, значение JSON, TTL = срок допуска.
+// Package valkey — источник истины для допусков: ключ admission:{token}, значение JSON, TTL = срок допуска.
 package valkey
 
 import (
@@ -13,7 +13,7 @@ import (
 	"github.com/nikolaysavelev/soldout/internal/queue/domain"
 )
 
-// Cache — реализация app.Cache.
+// Cache — Valkey-хранилище допусков, реализация app.Cache.
 type Cache struct{ client vk.Client }
 
 // New создаёт кэш.
@@ -34,7 +34,7 @@ func (c *Cache) Set(ctx context.Context, a domain.Admission, ttl time.Duration) 
 	return nil
 }
 
-// Get — допуск из кэша; app.ErrNotFound при промахе.
+// Get — допуск из Valkey; app.ErrNotFound при отсутствии или истечении TTL.
 func (c *Cache) Get(ctx context.Context, token string) (domain.Admission, error) {
 	var a domain.Admission
 	res := c.client.Do(ctx, c.client.B().Get().Key(key(token)).Build())

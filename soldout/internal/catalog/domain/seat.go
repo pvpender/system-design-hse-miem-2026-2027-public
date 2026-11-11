@@ -38,6 +38,22 @@ type SeatState struct {
 	Status api.SeatStatus
 }
 
+// SeatStateChange — событие outbox для batch-проекции.
+type SeatStateChange struct {
+	ID        uuid.UUID      `json:"id"`
+	SourceSeq int64          `json:"source_seq"`
+	EventID   uuid.UUID      `json:"event_id"`
+	SeatID    int64          `json:"seat_id"`
+	State     api.SeatStatus `json:"state"`
+}
+
+// SectorVersion — текущая версия сектора после batch (нужна и при повторной инвалидации).
+type SectorVersion struct {
+	EventID  uuid.UUID
+	SectorID uuid.UUID
+	Version  int64
+}
+
 // BuildSectorSeatMap собирает карту одного сектора: все места сектора, статусы из проекции, остальные — free.
 func BuildSectorSeatMap(eventID uuid.UUID, sec Sector, seats []Seat, states []SeatState, version int64) api.SeatMapSector {
 	byID := make(map[int64]api.SeatStatus, len(states))

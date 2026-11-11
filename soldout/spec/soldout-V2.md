@@ -77,7 +77,7 @@
 | Модуль | Ответственность | Владеет таблицами |
 |---|---|---|
 | `catalog` | мероприятия, площадки, секторы, места; карта зала | `events`, `venues`, `sectors`, `seats` |
-| `queue` | waiting room: допуски (на L1 — сразу), позиция, admission rate (L2) | `admissions` + ключи Valkey `admission:{token}` |
+| `queue` | waiting room: допуски (на L1 — сразу), позиция, admission rate (L2) | Valkey `admission:{token}` с TTL |
 | `booking` | hold/release/order/pay, лимит 4, истечение hold | `holds`, `orders`, `order_items` |
 | `payment` | идемпотентные платежи через эмулятор PSP | `payments` |
 | `ticketing` | выпуск билета с кодом | `tickets` |
@@ -88,7 +88,7 @@
 
 В связи с новым требованием меняется модель данных: цена уходит из конфигурации в таблицы. Необходимо прописать новые миграции в соответствии с новым функционалом и требованиями.
 
-Схема данных на уровне сущностей: `events(id, name, venue_id, starts_at, sales_open_at, sales_state)`, `venues(id, name)`, `sectors(id, venue_id, name, kind, capacity)`, `seats(id, sector_id, row_no, seat_no)`, `holds(id, event_id, seat_id, user_id, status, expires_at, created_at)`, `orders(id, event_id, user_id, status, amount, idempotency_key, …)`, `order_items(order_id, hold_id)`, `payments(id, order_id, status, psp_ref, idempotency_key)`, `tickets(id, order_id, seat_id, code, issued_at)`, `notifications(id, user_id, kind, payload, status, created_at)`, `admissions(token, event_id, user_id, issued_at, expires_at)`. Точная схема — `migrations/`.
+Схема данных на уровне сущностей: `events(id, name, venue_id, starts_at, sales_open_at, sales_state)`, `venues(id, name)`, `sectors(id, venue_id, name, kind, capacity)`, `seats(id, sector_id, row_no, seat_no)`, `holds(id, event_id, seat_id, user_id, status, expires_at, created_at)`, `orders(id, event_id, user_id, status, amount, idempotency_key, …)`, `order_items(order_id, hold_id)`, `payments(id, order_id, status, psp_ref, idempotency_key)`, `tickets(id, order_id, seat_id, code, issued_at)`, `notifications(id, user_id, kind, payload, status, created_at)`. Допуски queue хранятся только в Valkey с TTL. Точная схема — `migrations/`.
 
 ## 8. Инварианты
 

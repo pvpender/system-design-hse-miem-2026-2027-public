@@ -1,7 +1,7 @@
 // Package app — сценарии каталога и подписчик проекции карты зала.
 //
-// Карта зала — проекция (catalog_seat_state), а не чтение holds: booking публикует SeatStateChanged после commit,
-// подписчик HandleSeatState обновляет проекцию и версию сектора в одной транзакции, затем инвалидирует кэш.
+// Карта зала — проекция (catalog_seat_state), а не чтение holds: booking пишет SeatStateChanged в transactional outbox,
+// batch-projector идемпотентно обновляет проекцию и версии секторов, затем инвалидирует кэш и подтверждает batch.
 // Кэш хранит только проекцию с версией из БД и никогда не читается в пути hold (constitution 4, I1).
 package app
 
@@ -21,7 +21,7 @@ import (
 	bookingapi "github.com/nikolaysavelev/soldout/internal/booking/api"
 	"github.com/nikolaysavelev/soldout/internal/catalog/api"
 	"github.com/nikolaysavelev/soldout/internal/catalog/domain"
-	"github.com/nikolaysavelev/soldout/internal/platform/eventbus"
+	"github.com/nikolaysavelev/soldout/internal/platform/outbox"
 )
 
 // Repository — хранилище каталога (реализация в adapters/pg).
@@ -38,8 +38,8 @@ type Repository interface {
 	// проекция
 	SectorCounts(ctx context.Context, eventID uuid.UUID) (map[uuid.UUID]domain.SectorCounts, error)
 	SectorStates(ctx context.Context, eventID, sectorID uuid.UUID) ([]domain.SeatState, int64, error)
-	// ApplySeatState обновляет проекцию и инкрементирует версию сектора в одной транзакции; возвращает sector_id и новую версию.
-	ApplySeatState(ctx context.Context, eventID uuid.UUID, seatID int64, state api.SeatStatus) (uuid.UUID, int64, error)
+	// ApplySeatStates атомарно и идемпотентно применяет batch, возвращает текущие версии затронутых секторов.
+	ApplySeatStates(ctx context.Context, changes []domain.SeatStateChange) ([]domain.SectorVersion, error)
 }
 
 // Cache — кэш карты сектора (реализация в adapters/valkey). Версия — из БД.
@@ -238,31 +238,42 @@ func (s *Service) sectorSeats(ctx context.Context, sectorID uuid.UUID) ([]domain
 	return seats, nil
 }
 
-// HandleSeatState — подписчик eventbus: проекция + версия сектора в транзакции, затем инвалидация кэша.
-func (s *Service) HandleSeatState(ctx context.Context, e eventbus.Event) error {
-	ev, ok := e.(bookingapi.SeatStateChanged)
-	if !ok {
-		return fmt.Errorf("catalog: неожиданное событие %T", e)
+// HandleSeatStateBatch — at-least-once consumer outbox: batch Apply, затем одна инвалидация на сектор.
+// Ошибка инвалидации не даёт poller'у сделать ack, поэтому batch будет безопасно повторён.
+func (s *Service) HandleSeatStateBatch(ctx context.Context, records []outbox.Record) error {
+	changes := make([]domain.SeatStateChange, 0, len(records))
+	for _, r := range records {
+		var ev bookingapi.SeatStateChanged
+		if err := json.Unmarshal(r.Payload, &ev); err != nil {
+			return fmt.Errorf("catalog: decode SeatStateChanged %s: %w", r.ID, err)
+		}
+		var state api.SeatStatus
+		switch ev.State {
+		case bookingapi.SeatStateHeld:
+			state = api.SeatHeld
+		case bookingapi.SeatStateSold:
+			state = api.SeatSold
+		case bookingapi.SeatStateFree:
+			state = api.SeatFree
+		default:
+			return fmt.Errorf("catalog: неизвестное состояние места %q", ev.State)
+		}
+		changes = append(changes, domain.SeatStateChange{
+			ID: r.ID, SourceSeq: r.Seq, EventID: ev.EventID, SeatID: ev.SeatID, State: state,
+		})
 	}
-	var state api.SeatStatus
-	switch ev.State {
-	case bookingapi.SeatStateHeld:
-		state = api.SeatHeld
-	case bookingapi.SeatStateSold:
-		state = api.SeatSold
-	default:
-		state = api.SeatFree
-	}
-	sectorID, version, err := s.repo.ApplySeatState(ctx, ev.EventID, ev.SeatID, state)
+	versions, err := s.repo.ApplySeatStates(ctx, changes)
 	if err != nil {
 		return err
 	}
 	if s.cache != nil && s.opts.CacheInvalidate {
-		if err := s.cache.Invalidate(ctx, ev.EventID, sectorID, version); err != nil {
-			s.cm.Inc("error")
-			return fmt.Errorf("catalog: инвалидация кэша: %w", err)
+		for _, v := range versions {
+			if err := s.cache.Invalidate(ctx, v.EventID, v.SectorID, v.Version); err != nil {
+				s.cm.Inc("error")
+				return fmt.Errorf("catalog: инвалидация кэша: %w", err)
+			}
+			s.cm.Inc("invalidate")
 		}
-		s.cm.Inc("invalidate")
 	}
 	return nil
 }

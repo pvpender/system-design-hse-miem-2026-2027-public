@@ -32,7 +32,6 @@ import (
 	"github.com/nikolaysavelev/soldout/internal/platform/cache"
 	"github.com/nikolaysavelev/soldout/internal/platform/config"
 	"github.com/nikolaysavelev/soldout/internal/platform/db"
-	"github.com/nikolaysavelev/soldout/internal/platform/eventbus"
 	"github.com/nikolaysavelev/soldout/internal/platform/faults"
 	"github.com/nikolaysavelev/soldout/internal/platform/httpx"
 	platformlog "github.com/nikolaysavelev/soldout/internal/platform/log"
@@ -40,7 +39,6 @@ import (
 	"github.com/nikolaysavelev/soldout/internal/platform/otel"
 	"github.com/nikolaysavelev/soldout/internal/platform/outbox"
 	queuehttp "github.com/nikolaysavelev/soldout/internal/queue/adapters/http"
-	queuepg "github.com/nikolaysavelev/soldout/internal/queue/adapters/pg"
 	queuevalkey "github.com/nikolaysavelev/soldout/internal/queue/adapters/valkey"
 	queueapp "github.com/nikolaysavelev/soldout/internal/queue/app"
 	ticketinghttp "github.com/nikolaysavelev/soldout/internal/ticketing/adapters/http"
@@ -131,19 +129,17 @@ func run() error {
 	defer vk.Close()
 
 	// --- модули: сборка по правилу зависимостей (см. .go-arch-lint.yml) ---
-	bus := eventbus.New(cfg.EventbusWorkers, cfg.EventbusBuffer, m, logger)
 	// OrderPaidEvent → outbox в транзакции pay; доставка — Debezium (CDC) или polling notifier'а (lite)
 	bookingStore := bookingpg.New(pool, bookingpg.WithOutbox(outbox.NewWriter(outbox.Options{DeleteAfterInsert: cfg.OutboxDelete})))
 	// карта зала — проекция в catalog, наполняется из событий booking; кэш — только проекция с версией из БД
 	catalogSvc := catalogapp.New(catalogpg.New(pool), catalogvalkey.New(vk),
 		catalogapp.Options{CacheTTL: cfg.CacheTTL, CacheInvalidate: cfg.CacheInvalidate}, cacheOps{m}, logger)
-	bus.Subscribe(bookingapi.TopicSeatState, catalogSvc.HandleSeatState) // подписка — в cmd, модули друг о друге не знают
-	queueSvc := queueapp.New(queuepg.New(pool), queuevalkey.New(vk), catalogSvc, cfg.AdmissionTTL, logger)
+	queueSvc := queueapp.New(queuevalkey.New(vk), catalogSvc, cfg.AdmissionTTL)
 	paymentSvc := paymentapp.New(paymentpsp.New(flags.PSPFailRate, flags.SlowPSP), paymentpg.New(pool))
 	// notification с занятия 4 — отдельный сервис cmd/notifier (событие OrderPaidEvent), в монолите его нет
 	ticketingSvc := ticketingapp.New(ticketingpg.New(pool), logger)
 	bookingSvc := bookingapp.New(bookingStore, catalogSvc, queueSvc, paymentSvc, ticketingSvc,
-		bookingapp.Options{HoldTTL: cfg.HoldTTL, Pricing: bookingvalkey.New(vk), Faults: flags, Events: bus}, logger)
+		bookingapp.Options{HoldTTL: cfg.HoldTTL, Pricing: bookingvalkey.New(vk), Faults: flags}, logger)
 
 	// --- HTTP ---
 	r := chi.NewRouter()
@@ -182,21 +178,15 @@ func run() error {
 		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10,
 	}
 
-	// --- фоновые процессы и порядок остановки: стоп приёма → Shutdown → отмена expirer ---
+	// --- фоновые процессы и порядок остановки: стоп приёма → Shutdown → остановка projector/expirer ---
 	bgCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
 	g, gctx := errgroup.WithContext(ctx)
-	busCtx, stopBus := context.WithCancel(context.Background())
-	defer stopBus()
-	g.Go(func() error { bus.Run(busCtx); return nil })
+	seatProjector := outbox.NewPollerFor(bookingapi.AggregateSeat, pool, 500, 200*time.Millisecond)
+	g.Go(func() error { return seatProjector.Run(bgCtx, catalogSvc.HandleSeatStateBatch) })
 	g.Go(func() error {
 		bookingapp.NewExpirer(bookingStore, bookingapp.ExpirerOptions{
 			Interval: cfg.ExpirerInterval, BatchSize: cfg.ExpirerBatch, Gauge: m.HoldsActive, Batches: m.ExpirerBatchSize,
-			OnRelease: func(ctx context.Context, released []bookingapp.ReleasedHold) {
-				for _, h := range released {
-					_ = bus.Publish(ctx, bookingapi.SeatStateChanged{EventID: h.EventID, SeatID: h.SeatID, State: bookingapi.SeatStateFree, HoldID: h.ID, At: time.Now()})
-				}
-			},
 		}, logger).Run(bgCtx)
 		return nil
 	})
@@ -215,8 +205,7 @@ func run() error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			logger.Warn("HTTP-сервер остановлен принудительно", "err", err)
 		}
-		stopBackground() // expirer
-		stopBus()        // шина дочитывает буфер (drain) и завершает воркеры
+		stopBackground()
 		return nil
 	})
 	if err := g.Wait(); err != nil {

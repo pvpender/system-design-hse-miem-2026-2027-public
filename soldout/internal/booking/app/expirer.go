@@ -23,7 +23,6 @@ type Expirer struct {
 	pause     time.Duration
 	gauge     Gauge
 	batches   Observer
-	onRelease func(ctx context.Context, released []ReleasedHold)
 	logger    *slog.Logger
 }
 
@@ -34,8 +33,6 @@ type ExpirerOptions struct {
 	Pause     time.Duration
 	Gauge     Gauge
 	Batches   Observer
-	// OnRelease вызывается после каждого батча (шаг B: публикация SeatStateChanged).
-	OnRelease func(ctx context.Context, released []ReleasedHold)
 }
 
 // NewExpirer собирает expirer.
@@ -50,7 +47,7 @@ func NewExpirer(store Store, opts ExpirerOptions, logger *slog.Logger) *Expirer 
 		opts.Pause = 50 * time.Millisecond
 	}
 	return &Expirer{store: store, interval: opts.Interval, batchSize: opts.BatchSize, pause: opts.Pause,
-		gauge: opts.Gauge, batches: opts.Batches, onRelease: opts.OnRelease, logger: logger}
+		gauge: opts.Gauge, batches: opts.Batches, logger: logger}
 }
 
 // Run блокируется до отмены ctx.
@@ -81,9 +78,6 @@ func (e *Expirer) tick(ctx context.Context) {
 			e.batches.Observe(float64(len(released)))
 		}
 		total += len(released)
-		if len(released) > 0 && e.onRelease != nil {
-			e.onRelease(ctx, released)
-		}
 		if len(released) < e.batchSize {
 			break
 		}

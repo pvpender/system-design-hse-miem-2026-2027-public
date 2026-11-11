@@ -60,7 +60,8 @@ func TestConcurrentHolds_ExactlyOneWins(t *testing.T) {
 	eventID := uuid.MustParse("10000000-0000-4000-8000-000000000001")
 	venueID := uuid.MustParse("20000000-0000-4000-8000-000000000001")
 	sectorID := uuid.MustParse("30000000-0000-4000-8000-000000000001")
-	svc := app.New(bookingpg.New(pool), fakeCatalog{eventID: eventID, venueID: venueID, sectorID: sectorID}, fakeQueue{}, fakePayment{}, fakeTickets{},
+	store := bookingpg.New(pool)
+	svc := app.New(store, fakeCatalog{eventID: eventID, venueID: venueID, sectorID: sectorID}, fakeQueue{}, fakePayment{}, fakeTickets{},
 		app.Options{HoldTTL: time.Minute, Pricing: &fakePricing{}}, slog.Default())
 
 	const workers = 20
@@ -157,6 +158,22 @@ func TestConcurrentHolds_ExactlyOneWins(t *testing.T) {
 	// Отсутствие токена допуска → ErrAdmissionRequired.
 	if _, err := svc.CreateHold(ctx, api.CreateHoldInput{EventID: eventID, SeatID: 101, UserID: uuid.New()}); !errors.Is(err, api.ErrAdmissionRequired) {
 		t.Fatalf("без токена ожидался ErrAdmissionRequired: %v", err)
+	}
+
+	// Все успешные переходы записаны в seat-outbox; конфликтные/повторные операции их не дублируют.
+	var seatEvents int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE aggregatetype = 'seat'").Scan(&seatEvents); err != nil || seatEvents != 8 {
+		t.Fatalf("ожидалось 8 seat-событий (hold/release/pay), получено %d, %v", seatEvents, err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE holds SET expires_at = $1 WHERE seat_id = 10 AND status = 'active'", time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	released, err := store.ExpireHoldsBatch(ctx, time.Now(), 100)
+	if err != nil || len(released) != 1 {
+		t.Fatalf("expire должен атомарно освободить одно место: %+v, %v", released, err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE aggregatetype = 'seat' AND type = 'SeatStateChanged'").Scan(&seatEvents); err != nil || seatEvents != 9 {
+		t.Fatalf("expire должен добавить одно free-событие: %d, %v", seatEvents, err)
 	}
 }
 
