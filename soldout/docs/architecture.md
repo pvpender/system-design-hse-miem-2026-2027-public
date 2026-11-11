@@ -103,7 +103,7 @@ flowchart LR
 | Модуль | Ответственность | Владеет данными | HTTP |
 |---|---|---|---|
 | `catalog` | мероприятия, площадки, секторы, места, карта зала | `venues`, `sectors`, `seats`, `events` | `GET /v1/events`, `GET /v1/events/{id}`, `GET /v1/events/{id}/seatmap`, `POST /v1/admin/events`, `POST /v1/admin/events/{id}/open` |
-| `queue` | допуск в waiting room, проверка токена | `admissions`, ключи Valkey `admission:{token}` | `POST /v1/events/{id}/queue/join` |
+| `queue` | допуск в waiting room, проверка токена | ключи Valkey `admission:{token}` с TTL | `POST /v1/events/{id}/queue/join` |
 | `booking` | hold, release, заказ, оплата как сценарий, лимит 4, истечение | `holds`, `orders`, `order_items` | `POST /v1/holds`, `GET /v1/holds/{id}`, `DELETE /v1/holds/{id}`, `POST /v1/orders`, `GET /v1/orders/{id}`, `POST /v1/orders/{id}/pay` |
 | `payment` | идемпотентное списание через эмулятор PSP | `payments` | нет, вызывается через порт |
 | `ticketing` | выпуск билета с кодом, чтение билетов | `tickets` | `GET /v1/users/{id}/tickets` |
@@ -130,7 +130,7 @@ flowchart LR
 
 ### 5.1 Вход в waiting room и проверка допуска
 
-Токен привязан к паре (event, user) и живет `ADMISSION_TTL` (15 минут). Valkey ускоряет проверку, истина лежит в таблице `admissions`.
+Токен привязан к паре (event, user) и живет `ADMISSION_TTL` (15 минут). Valkey — единственное хранилище допуска; после потери Valkey пользователь повторно проходит Join.
 
 ```mermaid
 sequenceDiagram
@@ -139,7 +139,6 @@ sequenceDiagram
     participant QH as queue/http
     participant QA as queue/app
     participant C as catalog.api
-    participant PG as PostgreSQL
     participant VK as Valkey
 
     U->>QH: POST /v1/events/{id}/queue/join {user_id}
@@ -150,9 +149,8 @@ sequenceDiagram
         QA-->>U: 404 event_not_found
     else есть
         QA->>QA: NewAdmission: token = 16 случайных байт, position = 0
-        QA->>PG: INSERT admissions(token, event_id, user_id, issued_at, expires_at)
         QA->>VK: SET admission:{token} JSON PX 15m
-        Note over QA,VK: ошибка Valkey логируется и не ломает выдачу: кэш ускоряет, истина в PostgreSQL
+        Note over QA,VK: ошибка SET означает ошибку Join: непроверяемый токен не возвращается
         QA-->>U: 200 {token, position: 0, expires_at}
     end
 
@@ -162,11 +160,14 @@ sequenceDiagram
     participant BA as booking/app
     BA->>QA: Validate(token, eventID, userID)
     QA->>VK: GET admission:{token}
-    alt промах кэша или ошибка
-        QA->>PG: SELECT admissions WHERE token = $1
+    alt ключа нет
+        QA-->>BA: ErrAdmissionInvalid, дальше 401 admission_required
+    else ошибка Valkey
+        QA-->>BA: инфраструктурная ошибка, не 401
+    else токен найден
+        QA->>QA: ValidFor: совпали event_id и user_id, срок не истек
+        QA-->>BA: ok или ErrAdmissionInvalid
     end
-    QA->>QA: ValidFor: совпали event_id и user_id, срок не истек
-    QA-->>BA: ok или ErrAdmissionInvalid, дальше 401 admission_required
 ```
 
 ### 5.2 Hold места: два конкурента на одно место
@@ -332,6 +333,7 @@ sequenceDiagram
         loop батчами по HOLD_EXPIRER_BATCH = 500
             E->>PG: WITH batch AS (SELECT id FROM holds WHERE active AND expires_at <= now() ORDER BY expires_at LIMIT 500 FOR UPDATE SKIP LOCKED) UPDATE holds SET status = released
             PG-->>E: список освобожденных мест
+            E->>PG: batch INSERT free-событий в outbox в той же транзакции
             E->>M: expirer_batch_size.Observe(n)
             E->>E: пауза 50 мс между батчами
         end
@@ -344,6 +346,8 @@ sequenceDiagram
 `SKIP LOCKED` и батчи выбраны по результату замера: один большой `UPDATE` под штормом давал всплеск p99 ровно в момент замера. Параллельные `pay` и `release` при этом не блокируются.
 
 ### 5.6 Карта зала
+
+Текущая проекция `catalog_seat_state` наполняется через transactional outbox: booking записывает `SeatStateChanged` в транзакции hold/release/pay/expire. Отдельный polling-projector читает события `aggregatetype=seat` по монотонному `seq`, применяет их одним set-based batch и инвалидирует каждый сектор один раз. Дедупликация ID и high-watermark `(event, seat)` делают повторную доставку идемпотентной; ack выполняется только после Apply и инвалидации кэша.
 
 Самый тяжелый запрос baseline: 40 000 мест сериализуются целиком на каждый вызов, около 1.8 МБ ответа.
 
@@ -435,7 +439,6 @@ erDiagram
     holds ||--|| order_items : ""
     orders ||--o{ payments : ""
     orders ||--o{ tickets : ""
-    events ||--o{ admissions : ""
 ```
 
 | Инвариант | Формулировка | Чем обеспечен |
@@ -471,7 +474,7 @@ erDiagram
 - Профили: `/debug/pprof` с продленным дедлайном записи, Alloy тянет CPU, heap и goroutine каждые 15 с в Pyroscope.
 - Готовность: `/readyz` проверяет PostgreSQL и Valkey и печатает `gomaxprocs`, `gomemlimit`, `db_max_conns`, версию PgBouncer.
 
-Метрики `cache_ops_total`, `eventbus_published_total`, `eventbus_dropped_total`, `eventbus_queue_depth` уже объявлены и наполняются начиная с шага B.
+Метрика `cache_ops_total` наполняется при работе версионированного кэша карты. Метрики `eventbus_*` остаются для исторической in-process реализации; текущий путь SeatStateChanged использует durable outbox.
 
 ## 9. Что baseline делает плохо и куда это чинится
 
@@ -483,6 +486,6 @@ erDiagram
 | advisory-lock на горячем ряду | сотни сессий с `wait_event = advisory`, p99 hold 1.7 с | шаг C: `INSERT ... ON CONFLICT DO NOTHING RETURNING` по partial unique index, плюс `POST /v1/holds/any` |
 | допуск выдается сразу, очереди нет | весь трафик идет в консистентную часть | шаг D: настоящая очередь и admission rate |
 | билет и уведомление выпускаются внутри `pay` | падение после commit теряет билет, I3 нарушается | занятие 3: outbox, CDC, отдельные потребители |
-| нет аутентификации и rate limit | боты неотличимы от людей | занятие 8 |
+| нет аутентификации и rate limit | боты неотличимы от людей | занятие 6 |
 
 Полные цифры baseline: `lessons/02/baseline.md`. Решение о стартовой архитектуре и список осознанных упрощений: `docs/adr/ADR-001-modular-monolith.md`.

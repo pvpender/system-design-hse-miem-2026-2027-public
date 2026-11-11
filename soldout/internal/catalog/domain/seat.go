@@ -24,17 +24,35 @@ type Seat struct {
 	VenueID  uuid.UUID
 	RowNo    int
 	SeatNo   int
+	Pricing  api.SectorPricing
 }
 
 // ToAPI — DTO.
 func (s Seat) ToAPI() api.Seat {
-	return api.Seat{ID: s.ID, SectorID: s.SectorID, VenueID: s.VenueID, RowNo: s.RowNo, SeatNo: s.SeatNo}
+	return api.Seat{ID: s.ID, SectorID: s.SectorID, VenueID: s.VenueID, RowNo: s.RowNo, SeatNo: s.SeatNo, Pricing: s.Pricing}
 }
 
 // SeatState — строка проекции: место сектора со статусом held/sold.
 type SeatState struct {
 	SeatID int64
 	Status api.SeatStatus
+}
+
+// SeatStateChange — событие outbox для batch-проекции.
+type SeatStateChange struct {
+	ID        uuid.UUID      `json:"id"`
+	SourceSeq int64          `json:"source_seq"`
+	EventID   uuid.UUID      `json:"event_id"`
+	SeatID    int64          `json:"seat_id"`
+	State     api.SeatStatus `json:"state"`
+	HoldID    uuid.UUID      `json:"hold_id"`
+}
+
+// SectorVersion — текущая версия сектора после batch (нужна и при повторной инвалидации).
+type SectorVersion struct {
+	EventID  uuid.UUID
+	SectorID uuid.UUID
+	Version  int64
 }
 
 // BuildSectorSeatMap собирает карту одного сектора: все места сектора, статусы из проекции, остальные — free.

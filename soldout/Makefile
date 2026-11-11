@@ -1,11 +1,8 @@
-# soldout — команды стенда. По умолчанию — стенд занятия 5 (LESSON=05: оверлеи lesson-02 + lesson-04 + lesson-05,
-# приложения за балансировщиком lb, профиль apps). K8S=1: приложения в кластере k3d, в compose остается stateful.
-# Занятие 4: LESSON=04; занятие 2: LESSON=02 / make up-02; занятие 1: make up-01 / LESSON=01.
+# soldout — команды стенда. По умолчанию — стенд занятия 4 (LESSON=04: оверлеи lesson-02 + lesson-04);
+# занятие 2: LESSON=02 / make up-02; занятие 1: make up-01 / LESSON=01.
 SHELL := /bin/bash
-LESSON ?= 05
-ifeq ($(LESSON),05)
-COMPOSE_OVERLAYS ?= -f compose/lesson-02.yml -f compose/lesson-04.yml -f compose/lesson-05.yml
-else ifeq ($(LESSON),04)
+LESSON ?= 04
+ifeq ($(LESSON),04)
 COMPOSE_OVERLAYS ?= -f compose/lesson-02.yml -f compose/lesson-04.yml
 else
 COMPOSE_OVERLAYS ?= -f compose/lesson-$(LESSON).yml
@@ -16,20 +13,6 @@ ifeq ($(LESSON),04)
 export SEED_SEATS_PER_EVENT ?= 80000
 PROFILES := --profile obs --profile cdc
 endif
-ifeq ($(LESSON),05)
-export SEED_SEATS_PER_EVENT ?= 80000
-# режим стенда: compose (приложения в compose за lb) или k8s (приложения в k3d); пишут make up и make k8s-deploy
-MODE := $(shell cat tmp/stand-mode 2>/dev/null)
-PROFILES := --profile obs --profile cdc $(if $(or $(K8S),$(filter k8s,$(MODE))),,--profile apps)
-endif
-# адрес приложения с хоста и из контейнера k6: в режиме k8s это ingress кластера (с хоста порт 8089,
-# из контейнера k6 балансировщик k3d в той же сети Docker)
-ifeq ($(MODE),k8s)
-HOST_URL ?= http://localhost:8089
-export K6_BASE_URL ?= http://k3d-soldout-serverlb:80
-else
-HOST_URL ?= http://localhost:8080
-endif
 ifeq ($(LESSON),01)
 PROFILES :=
 endif
@@ -37,7 +20,7 @@ COMPOSE := docker compose -f docker-compose.yml $(COMPOSE_OVERLAYS)
 COMPOSE_OBS := $(COMPOSE) $(PROFILES)
 GOBIN ?= $(shell go env GOPATH)/bin
 ARCH_LINT := $(GOBIN)/go-arch-lint
-K6_OUT := $(if $(filter 02 04 05,$(LESSON)),-o experimental-prometheus-rw,)
+K6_OUT := $(if $(filter 02 04,$(LESSON)),-o experimental-prometheus-rw,)
 # --no-deps: k6 не трогает стенд. Без него compose пересоздаёт soldout с дефолтным окружением
 # и молча отменяет make break-* (стрельба идёт уже не по той конфигурации).
 K6_RUN := $(COMPOSE) --profile load run --rm --no-deps k6 run $(K6_OUT)
@@ -54,20 +37,16 @@ export VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
         invariants invariants-local lint-arch lint-arch-install lint-migrations lint-semgrep lint-asyncapi fitness-red-semgrep lint-all test test-unit vet fmt \
         pprof-top pprof-window pprof-heap pg-top pg-reset pg-activity explain-seatstates results docker-stats pgbouncer-pools \
         break-cache break-admission break-pool break-prepared break-goroutine restore \
-        trace-last traces-slow trace-json grafana-token cdc-status cdc-register kill-notifier poison dlq up-poll repair-i5 \
-        up-05 scale scale-reset k8s-cluster k8s-images k8s-deploy k8s-up k8s-rollout k8s-rollout-step k8s-lag-burst k8s-storm holds-reset kubeconfig-ro break-oom restore-k8s lint-k8s fitness-red-k8s k8s-undeploy k8s-down k8s-status k8s-watch
+        trace-last traces-slow trace-json grafana-token cdc-status cdc-register kill-notifier poison dlq up-poll repair-i5
 
 help:
-	@echo "Стенд:      up (=up-05) | up-02 | up-01 | up-lite | down | switch BRANCH=demo/l4-otel | logs | ps | psql"
+	@echo "Стенд:      up (=up-04) | up-02 | up-01 | up-lite | down | switch BRANCH=demo/l4-otel | logs | ps | psql"
 	@echo "Нагрузка:   smoke | storm (2 мин) | storm-short (60 с) | hot-row | waiting-room | holds-any-demo"
 	@echo "Занятие 4:  checkout (150 VU, 90 с) | checkout-storm (= checkout WITH_STORM=1) | pay-demo"
 	@echo "Трейсы:     trace-last | traces-slow [Q=TraceQL] | trace-json TRACE=<id> | grafana-token"
 	@echo "Проверки:   invariants | lint-arch | lint-migrations | lint-all | test | test-unit | results"
 	@echo "Профиль:    pprof-top | pprof-heap | pg-top | pg-reset | pg-activity | explain-seatstates | docker-stats"
 	@echo "События:    cdc-status | cdc-register | dlq | repair-i5 | up-poll (вариант A: polling без Debezium)"
-	@echo "Занятие 5:  scale SOLDOUT=n NOTIFIER=m | scale-reset | holds-reset | up K8S=1 | k8s-cluster | k8s-deploy | k8s-status | k8s-watch"
-	@echo "            k8s-rollout [NO_READINESS=1] | k8s-lag-burst | k8s-storm [SOLDOUT_MAX=1] | break-oom | restore-k8s | k8s-down"
-	@echo "            lint-k8s | fitness-red-k8s | kubeconfig-ro   (docs/deploy.md)"
 	@echo "Сломы:      break-cache | break-admission | break-pool | break-prepared | kill-notifier | poison | restore"
 
 build:
@@ -86,32 +65,17 @@ up-04:
 	@COMPOSE="$(COMPOSE)" tools/cdc/register.sh
 	@-tools/grafana/sa-token.sh >/dev/null 2>&1 || echo "grafana-token: Grafana недоступна, токен для mcp-grafana не создан (make grafana-token)"
 
-up-05:
-ifeq ($(K8S),1)
-	-@$(COMPOSE) --profile apps rm -sf lb soldout notifier >/dev/null 2>&1
-	$(MAKE) up-stack LESSON=05 K8S=1
-	$(MAKE) k8s-up
-else
-	@if $(HELM) status soldout >/dev/null 2>&1; then $(HELM) uninstall soldout --wait >/dev/null && echo "релиз soldout в кластере удален: приложения возвращаются в compose"; fi
-	@mkdir -p tmp && echo compose > tmp/stand-mode
-	$(MAKE) up-stack LESSON=05 MODE=compose
-	@COMPOSE="$(COMPOSE)" tools/cdc/register.sh
-endif
-	@-tools/grafana/sa-token.sh >/dev/null 2>&1 || echo "grafana-token: Grafana недоступна, токен для mcp-grafana не создан (make grafana-token)"
-
 up-stack:
 	$(COMPOSE_OBS) up -d --build --wait
-	@echo "готово: $(HOST_URL)/readyz  Grafana: http://localhost:3000/d/soldout-red  Pyroscope: http://localhost:4040"
+	@echo "готово: http://localhost:8080/readyz  Grafana: http://localhost:3000/d/soldout-red  Pyroscope: http://localhost:4040"
 
 up-lite:
-	$(MAKE) up-stack COMPOSE_OVERLAYS="-f compose/lesson-02.yml -f compose/lesson-04.yml -f compose/lesson-05.yml -f compose/lite.yml" PROFILES="--profile apps" SEED_SEATS_PER_EVENT=4000
+	$(MAKE) up-stack COMPOSE_OVERLAYS="-f compose/lesson-02.yml -f compose/lesson-04.yml -f compose/lite.yml" PROFILES= SEED_SEATS_PER_EVENT=4000
 
-up-obs: up-05
+up-obs: up-04
 
-# кластер k3d живет в сети стенда, поэтому удаляется первым
 down:
-	-@k3d cluster list $(K3D_CLUSTER) >/dev/null 2>&1 && $(MAKE) k8s-down
-	$(COMPOSE) --profile load --profile tools --profile obs --profile cdc --profile apps down -v --remove-orphans
+	$(COMPOSE) --profile load --profile tools --profile obs --profile cdc down -v --remove-orphans
 
 # make switch BRANCH=demo/l2-stepA — переключить ветку и пересобрать сервис (данные сохраняются).
 # Только вперёд по шагам: если схема в БД новее миграций целевой ветки, нужен make down && make up.
@@ -132,8 +96,8 @@ switch:
 switch-apply:
 	$(COMPOSE_OBS) build $$($(COMPOSE_OBS) config --services | grep -vx postgres | tr '\n' ' ')
 	$(COMPOSE_OBS) up -d --wait
-	@if [ -x tools/cdc/register.sh ] && [ "$(LESSON)" != 02 ] && [ "$(LESSON)" != 01 ]; then COMPOSE="$(COMPOSE)" tools/cdc/register.sh; fi
-	@curl -s $(HOST_URL)/readyz && echo
+	@if [ -x tools/cdc/register.sh ] && [ "$(LESSON)" = 04 ]; then COMPOSE="$(COMPOSE)" tools/cdc/register.sh; fi
+	@curl -s localhost:8080/readyz && echo
 
 logs:
 	$(COMPOSE) logs -f soldout
@@ -147,174 +111,6 @@ psql:
 seed:
 	$(COMPOSE) exec -T postgres psql -U soldout -d soldout -v ON_ERROR_STOP=1 \
 		-c "SET soldout.seats_per_event = '$${SEED_SEATS_PER_EVENT:-40000}'" -f - < seed/seed.sql
-
-# ---------- занятие 5: реплики в compose ----------
-# make scale SOLDOUT=2 — вторая реплика монолита за lb; make scale NOTIFIER=3 — три потребителя группы notifier.
-# lb находит реплики по DNS Docker за 5 с. Любой make up / restore / break-* возвращает по одной реплике.
-SOLDOUT ?= 1
-NOTIFIER ?= 1
-scale:
-	$(COMPOSE_OBS) up -d --no-recreate --wait --scale soldout=$(SOLDOUT) --scale notifier=$(NOTIFIER)
-	@sleep 6; $(COMPOSE) ps --format '{{.Service}}\t{{.Name}}\t{{.Status}}' soldout notifier lb
-
-scale-reset:
-	$(MAKE) scale SOLDOUT=1 NOTIFIER=1
-
-# ---------- занятие 5: Kubernetes (k3d). Подробно: ../deploy/README.md, docs/deploy.md ----------
-DEPLOY := ../deploy
-CHART := $(DEPLOY)/charts/soldout
-K3D_CLUSTER := soldout
-KCTX := k3d-$(K3D_CLUSTER)
-KUBECTL := kubectl --context $(KCTX)
-HELM := helm --kube-context $(KCTX)
-KEDA_VERSION ?= 2.21.0
-KEDA_IMAGES := ghcr.io/kedacore/keda:$(KEDA_VERSION) ghcr.io/kedacore/keda-metrics-apiserver:$(KEDA_VERSION) ghcr.io/kedacore/keda-admission-webhooks:$(KEDA_VERSION)
-TAG ?= lesson-5
-# свои строки подключения для подов: K8S_DATABASE_URL, K8S_DATABASE_URL_DIRECT, K8S_NOTIFIER_DATABASE_URL в .env.local
-HELM_SECRETS := $(shell [ -f .env.local ] && sed -n 's/^K8S_\([A-Z_]*DATABASE_URL[A-Z_]*\)=\(.*\)/--set-string secrets.data.\1=\2/p' .env.local)
-HELM_VALUES = -f $(CHART)/values-k3d.yaml --set image.tag=$(TAG) $(HELM_SECRETS) $(HELM_EXTRA)
-
-# кластер, KEDA и образы: медленная часть (2-3 минуты), делается до занятия; compose-приложения не трогает
-k8s-cluster:
-	@command -v k3d >/dev/null && command -v helm >/dev/null || { echo "нужны k3d и helm: brew install k3d helm"; exit 1; }
-	@docker network inspect soldout_default >/dev/null 2>&1 || { echo "сначала make up: кластер подключается к сети стенда soldout_default"; exit 1; }
-	@k3d cluster list $(K3D_CLUSTER) >/dev/null 2>&1 || k3d cluster create --config $(DEPLOY)/k3d/cluster.yaml
-	@$(HELM) repo add kedacore https://kedacore.github.io/charts >/dev/null 2>&1 || true
-	@# образы KEDA один раз скачиваются в Docker хоста и кладутся в узлы: новый кластер не зависит от скорости ghcr.io
-	@for i in $(KEDA_IMAGES); do docker image inspect $$i >/dev/null 2>&1 || docker pull -q $$i; done
-	@k3d image import $(KEDA_IMAGES) -c $(K3D_CLUSTER) >/dev/null 2>&1 || echo "k3d image import образов KEDA не удался: кластер скачает их сам"
-	$(HELM) upgrade --install keda kedacore/keda --version $(KEDA_VERSION) -n keda --create-namespace --wait --timeout 8m >/dev/null
-	$(MAKE) k8s-images
-	@$(KUBECTL) get nodes
-
-# образы собирает compose (тот же Dockerfile), k3d кладет их в узлы: реестр на стенде не нужен
-k8s-images:
-	$(COMPOSE) build soldout notifier
-	@[ "$(TAG)" = lesson-5 ] || { docker tag soldout:lesson-5 soldout:$(TAG); docker tag soldout-notifier:lesson-5 soldout-notifier:$(TAG); }
-	k3d image import soldout:$(TAG) soldout-notifier:$(TAG) -c $(K3D_CLUSTER)
-
-# приложения переезжают в кластер: у стенда один набор приложений, compose-реплики останавливаются
-k8s-deploy:
-	-@$(COMPOSE) --profile apps rm -sf lb soldout notifier >/dev/null 2>&1
-	@mkdir -p tmp && echo k8s > tmp/stand-mode
-	@echo "helm upgrade --install soldout (тег $(TAG))"; $(HELM) upgrade --install soldout $(CHART) $(HELM_VALUES) --wait --timeout 4m 2> >(grep -v warnings.go >&2) | grep -E "STATUS|REVISION"
-	@COMPOSE="$(COMPOSE)" tools/cdc/register.sh
-	@$(KUBECTL) get pods -o wide
-	@echo "готово: http://localhost:8089/readyz (ingress кластера); назад в compose: make up"
-
-k8s-up: k8s-cluster k8s-deploy
-
-# Выкатка новой версии под нагрузкой (в другом терминале make checkout). Образ тот же, тег новый: rollout настоящий.
-#   make k8s-rollout                  readiness + preStop: 0 ошибок
-#   make k8s-rollout NO_READINESS=1   две версии подряд без readiness и preStop. Первая заменяет поды, у которых
-#                                     preStop еще есть, и может пройти чисто; вторая останавливает поды без паузы:
-#                                     балансировщик еще шлет в них запросы, а процесс уже не слушает
-#   make k8s-rollout TAG=v2           свой тег
-k8s-rollout:
-	@$(MAKE) --no-print-directory k8s-rollout-step ROLLOUT_TAG=$(if $(filter lesson-5,$(TAG)),r$$(date +%H%M%S),$(TAG))
-ifeq ($(NO_READINESS),1)
-	@$(MAKE) --no-print-directory k8s-rollout-step ROLLOUT_TAG=$(if $(filter lesson-5,$(TAG)),r$$(date +%H%M%S),$(TAG))b
-endif
-	@$(KUBECTL) get pods -l app.kubernetes.io/name=soldout -o custom-columns=POD:.metadata.name,IMAGE:.spec.containers[0].image,READY:.status.containerStatuses[0].ready,STARTED:.status.startTime
-
-k8s-rollout-step:
-	@tag=$(ROLLOUT_TAG); \
-	docker tag soldout:lesson-5 soldout:$$tag && docker tag soldout-notifier:lesson-5 soldout-notifier:$$tag && \
-	k3d image import soldout:$$tag soldout-notifier:$$tag -c $(K3D_CLUSTER) >/dev/null 2>&1 && \
-	echo ">>> rollout $$tag$(if $(NO_READINESS), БЕЗ readiness и preStop,) $$(date +%T)" && \
-	$(HELM) upgrade soldout $(CHART) $(HELM_VALUES) --set image.tag=$$tag $(if $(NO_READINESS),--set soldout.probes.enabled=false) --wait --timeout 3m 2> >(grep -v warnings.go >&2) >/dev/null && \
-	$(KUBECTL) rollout status deploy/soldout --timeout 120s >/dev/null && echo ">>> готово $$(date +%T)"; rc=$$?; \
-	docker rmi soldout:$$tag soldout-notifier:$$tag >/dev/null 2>&1; exit $$rc
-
-# ---------- занятие 5: автоскейлинг ----------
-# KEDA по лагу: notifier ставится на паузу (0 реплик) на NOTIFIER_DOWN секунд под checkout, лаг растет до тысяч.
-# После снятия паузы KEDA поднимает реплики по числу партиций (до 3), лаг уходит, через минуту остается одна.
-k8s-lag-burst:
-	@test "$(MODE)" = k8s || { echo "приложения не в кластере: make k8s-deploy"; exit 1; }
-	@mkdir -p $(RESULTS); rm -f $(RESULTS)/.notifier-start; \
-	tools/demo/k8s-timeline.sh 280 > $(RESULTS)/k8s-lag-burst-timeline.txt & tl=$$!; \
-	(sleep 20; echo ">>> notifier: пауза KEDA, 0 реплик"; $(KUBECTL) annotate scaledobject notifier autoscaling.keda.sh/paused-replicas=0 --overwrite >/dev/null; \
-	 sleep $(NOTIFIER_DOWN); echo ">>> пауза снята, лаг $$($(LAG))"; $(KUBECTL) annotate scaledobject notifier autoscaling.keda.sh/paused-replicas- >/dev/null; date +%s > $(RESULTS)/.notifier-start) & \
-	$(K6_RUN_CHECKOUT) --summary-export=/results/checkout-lag-burst-$(STEP).json /scripts/checkout.js; rc=$$?; wait %2; \
-	echo "ждём, пока notifier догонит…"; \
-	until [ "$$($(LAG))" = "0" ]; do sleep 1; done; \
-	echo "лаг 0 через $$(( $$(date +%s) - $$(cat $(RESULTS)/.notifier-start) )) с после снятия паузы; ждём возврата к одной реплике…"; \
-	until [ "$$($(KUBECTL) get deploy notifier -o jsonpath='{.status.replicas}')" = "1" ]; do sleep 3; done; sleep 10; \
-	kill $$tl 2>/dev/null; cat $(RESULTS)/k8s-lag-burst-timeline.txt; \
-	$(PSQL) -c "SELECT (SELECT count(*) FROM orders WHERE status = 'paid') AS paid, (SELECT count(*) FROM notifications WHERE kind = 'tickets_issued') AS notifications, (SELECT count(*) FROM (SELECT payload->>'order_id' FROM notifications WHERE kind = 'tickets_issued' GROUP BY 1 HAVING count(*) > 1) d) AS duplicates, (SELECT count(*) FROM notifications WHERE order_id IS NOT NULL AND status <> 'sent') AS notifier_not_sent;"; \
-	exit $$rc
-
-# Сравнимость штормов: прогон стартует с нулем активных hold, иначе растет доля 409 и цифры не сопоставить.
-# Ждать TTL 10 минут на занятии некогда: активные hold и их строки проекции удаляются, версии секторов растут.
-holds-reset:
-	@$(PSQL) -q -c "DELETE FROM holds WHERE status = 'active'" -c "DELETE FROM admissions"
-	@sleep 5   # шины реплик дочитывают события прошлого прогона, иначе они вернут строки в проекцию
-	@$(PSQL) -q -c "DELETE FROM catalog_seat_state c WHERE c.state = 'held' AND NOT EXISTS (SELECT 1 FROM holds h WHERE h.event_id = c.event_id AND h.seat_id = c.seat_id AND h.status = 'active')" \
-		-c "UPDATE catalog_sector_version SET version = version + 1, updated_at = now()"
-	@echo "holds-reset: активных hold $$($(PSQL) -Atc "SELECT count(*) FROM holds WHERE status = 'active'")"
-
-# HPA по CPU: шторм 90 с через ingress, HPA поднимает soldout до SOLDOUT_MAX. Лента показывает, что RPS при
-# этом не растет: узкое место в PostgreSQL. make k8s-storm SOLDOUT_MAX=1 — тот же шторм на одной реплике.
-SOLDOUT_MAX ?= 3
-K8S_STORM_DURATION ?= 90s
-k8s-storm:
-	@test "$(MODE)" = k8s || { echo "приложения не в кластере: make k8s-deploy"; exit 1; }
-	@$(KUBECTL) patch hpa soldout --type merge -p '{"spec":{"maxReplicas":$(SOLDOUT_MAX)}}' >/dev/null
-	@$(MAKE) pg-reset >/dev/null 2>&1 || true
-	@$(MAKE) --no-print-directory holds-reset
-	@mkdir -p $(RESULTS); tools/demo/k8s-timeline.sh 150 > $(RESULTS)/k8s-storm-timeline.txt & tl=$$!; \
-	STORM_DURATION=$(K8S_STORM_DURATION) $(K6_RUN) --summary-export=/results/k8s-storm-$(STEP).json /scripts/storm.js; rc=$$?; \
-	kill $$tl 2>/dev/null; cat $(RESULTS)/k8s-storm-timeline.txt; \
-	$(KUBECTL) patch hpa soldout --type merge -p '{"spec":{"maxReplicas":3}}' >/dev/null; \
-	$(KUBECTL) get hpa soldout; exit $$rc
-
-# ---------- занятие 5: агент и кластер ----------
-# kubeconfig агента: ServiceAccount agent-ro, только get/list/watch, без секретов. Агент диагностирует, но не меняет.
-kubeconfig-ro:
-	@KCTX=$(KCTX) tools/k8s/kubeconfig-ro.sh
-
-# слом: лимит памяти soldout 96 МиБ при GOMEMLIMIT 440 МиБ. Без нагрузки под живет (десятки МиБ), короткий шторм
-# поднимает кучу выше лимита раньше, чем GC начнет ее сдерживать: OOMKilled, затем CrashLoopBackOff.
-break-oom:
-	@$(HELM) upgrade soldout $(CHART) $(HELM_VALUES) --set soldout.resources.limits.memory=96Mi --set soldout.resources.requests.memory=96Mi --wait --timeout 2m 2> >(grep -v warnings.go >&2) >/dev/null
-	@echo "выкачен soldout с limits.memory=96Mi, без нагрузки под Running; даем шторм на 15 с…"
-	@(STORM_DURATION=15s $(K6_RUN) /scripts/storm.js >/dev/null 2>&1 || true) & \
-	for i in 1 2 3 4 5 6; do sleep 7; $(KUBECTL) get pods -l app.kubernetes.io/name=soldout --no-headers; done; wait
-	@echo "диагностика только на чтение: kubectl --kubeconfig .kube/agent-ro describe pod -l app.kubernetes.io/name=soldout; починка: make restore-k8s"
-
-restore-k8s:
-	@$(HELM) upgrade soldout $(CHART) $(HELM_VALUES) --wait --timeout 3m 2> >(grep -v warnings.go >&2) >/dev/null
-	@$(KUBECTL) rollout status deploy/soldout --timeout 120s
-	@$(KUBECTL) get pods
-
-# fitness functions инфраструктуры: схема манифестов (kubeconform) и политики (conftest, deploy/policies/*.rego).
-# Оба инструмента в контейнерах; на хосте нужен только helm. Схема ScaledObject берется из каталога CRD (нужна сеть).
-KUBECONFORM := docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0
-CONFTEST := docker run --rm -i -v $(abspath $(DEPLOY)/policies):/policy:ro openpolicyagent/conftest:v0.71.0
-CRD_SCHEMAS := https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
-lint-k8s:
-	@command -v helm >/dev/null || { echo "lint-k8s: нужен helm (brew install helm)"; exit 1; }
-	@mkdir -p tmp && helm template soldout $(CHART) -f $(CHART)/values-k3d.yaml > tmp/k8s-rendered.yaml
-	@$(KUBECONFORM) -strict -summary -schema-location default -schema-location '$(CRD_SCHEMAS)' - < tmp/k8s-rendered.yaml | sed 's/^/kubeconform: /'; test $${PIPESTATUS[0]} -eq 0
-	@$(CONFTEST) verify --no-color -p /policy | tail -1 | sed 's/^/политики (conftest verify): /'; test $${PIPESTATUS[0]} -eq 0
-	@$(CONFTEST) test --combine --no-color -p /policy - < tmp/k8s-rendered.yaml
-	@echo "lint-k8s: ok"
-
-fitness-red-k8s:   ## красный пример: копия чарта с latest и без readiness, политики находят ровно два нарушения
-	@tools/k8s/fitness-red.sh
-
-k8s-undeploy:
-	-$(HELM) uninstall soldout --wait
-
-k8s-down:
-	-k3d cluster delete $(K3D_CLUSTER)
-	@rm -f tmp/stand-mode
-
-k8s-status:
-	@$(KUBECTL) get deploy,hpa,scaledobject,pdb,pods,ingress
-
-k8s-watch:         ## HPA, ScaledObject и поды раз в 2 с (Ctrl+C)
-	@while true; do out=$$($(KUBECTL) get hpa,scaledobject,pods 2>&1); clear; date +%T; echo "$$out"; sleep 2; done
 
 # ---------- нагрузка ----------
 smoke:
@@ -349,11 +145,11 @@ checkout-storm:
 	$(MAKE) checkout WITH_STORM=1
 
 pay-demo:
-	@BASE_URL=$(HOST_URL) tools/demo/pay-demo.sh
+	@tools/demo/pay-demo.sh
 
 # ---------- занятие 4: трейсы (Tempo) ----------
 trace-last:        ## trace_id последнего pay из логов и ссылка на Grafana Explore
-	@COMPOSE="$(COMPOSE)" $(if $(filter k8s,$(MODE)),SOLDOUT_LOGS="$(KUBECTL) logs -l app.kubernetes.io/name=soldout --tail=-1") tools/demo/trace.sh last
+	@COMPOSE="$(COMPOSE)" tools/demo/trace.sh last
 
 traces-slow:       ## TraceQL: pay дольше 1 с за 5 минут (свой запрос: make traces-slow Q='{ span.retry.attempt = 1 }')
 	@COMPOSE="$(COMPOSE)" tools/demo/trace.sh slow $(if $(Q),'$(Q)',)
@@ -373,19 +169,12 @@ cdc-status:        ## слот репликации (active, отставани�
 cdc-register:      ## (пере)регистрировать коннектор вручную; make up делает это сам
 	@COMPOSE="$(COMPOSE)" tools/cdc/register.sh
 
-# слом: notifier остановлен на NOTIFIER_DOWN секунд посреди checkout — лаг растёт, после старта догоняет без потерь
-# и дублей. Останавливаются и стартуют все реплики (make scale NOTIFIER=3). Лаг отдаёт экспортёр notifier-lag (8091).
-# NOTIFIER_DOWN=75 — старт уже после конца нагрузки: чистое время разбора очереди (замеры занятия 5).
-NOTIFIER_DOWN ?= 40
-LAG := curl -s localhost:8091/metrics | awk '/^notifier_lag /{print $$2}'
+# слом: notifier остановлен на 40 с посреди checkout — лаг растёт, после старта догоняет без потерь и дублей
 kill-notifier:
-	@mkdir -p $(RESULTS); rm -f $(RESULTS)/.notifier-start; \
-	(sleep 20; echo ">>> stop notifier"; $(COMPOSE) stop notifier >/dev/null; sleep $(NOTIFIER_DOWN); \
-	 echo ">>> start notifier, лаг $$($(LAG))"; $(COMPOSE) start notifier >/dev/null; date +%s > $(RESULTS)/.notifier-start) & \
+	@(sleep 20; echo ">>> stop notifier"; $(COMPOSE) stop notifier >/dev/null; sleep 40; echo ">>> start notifier"; $(COMPOSE) start notifier >/dev/null) & \
 	$(K6_RUN_CHECKOUT) --summary-export=/results/checkout-kill-notifier-$(STEP).json /scripts/checkout.js; rc=$$?; wait; \
 	echo "ждём, пока notifier догонит…"; \
-	until [ "$$($(LAG))" = "0" ]; do sleep 1; done; \
-	echo "лаг 0 через $$(( $$(date +%s) - $$(cat $(RESULTS)/.notifier-start) )) с после старта notifier"; sleep 6; \
+	until [ "$$(curl -s localhost:8091/metrics | awk '/^notifier_lag /{print $$2}')" = "0" ]; do sleep 2; done; sleep 6; \
 	$(PSQL) -c "SELECT (SELECT count(*) FROM orders WHERE status = 'paid') AS paid, (SELECT count(*) FROM notifications WHERE kind = 'tickets_issued') AS notifications, (SELECT count(*) FROM (SELECT payload->>'order_id' FROM notifications WHERE kind = 'tickets_issued' GROUP BY 1 HAVING count(*) > 1) d) AS duplicates, (SELECT count(*) FROM notifications WHERE order_id IS NOT NULL AND status <> 'sent') AS notifier_not_sent;"; \
 	exit $$rc
 
@@ -427,7 +216,7 @@ holds-any-demo:
 	HOT_MODE=any $(K6_RUN) --summary-export=/results/holds-any-$(STEP).json /scripts/hot-row.js
 
 queue-status:
-	@curl -s $(HOST_URL)/v1/events/10000000-0000-4000-8000-000000000001/queue/stats | python3 -m json.tool
+	@curl -s localhost:8080/v1/events/10000000-0000-4000-8000-000000000001/queue/stats | python3 -m json.tool
 
 # ---------- проверки ----------
 invariants:
@@ -465,7 +254,7 @@ lint-asyncapi:
 fitness-red-semgrep:  ## красный пример: правило находит письмо и горутину после InTx
 	-@$(SEMGREP) --config tools/semgrep/rules.yml --error tools/semgrep/red
 
-lint-all: vet lint-arch lint-migrations lint-semgrep lint-k8s
+lint-all: vet lint-arch lint-migrations lint-semgrep
 
 test:
 	go test ./... -count=1
@@ -489,7 +278,7 @@ pprof-top:
 	@mkdir -p $(RESULTS)
 	-@$(COMPOSE_OBS) pause alloy >/dev/null 2>&1
 	@for i in 1 2 3 4; do \
-		if go tool pprof -top -nodecount=30 -seconds 20 $(HOST_URL)/debug/pprof/profile 2>/dev/null | tee $(RESULTS)/pprof-top-$(STEP).txt | grep -q flat; then break; fi; \
+		if go tool pprof -top -nodecount=30 -seconds 20 http://localhost:8080/debug/pprof/profile 2>/dev/null | tee $(RESULTS)/pprof-top-$(STEP).txt | grep -q flat; then break; fi; \
 		echo "профиль занят Alloy, ждём 5 с…"; sleep 5; \
 	done
 	-@$(COMPOSE_OBS) unpause alloy >/dev/null 2>&1
@@ -502,7 +291,7 @@ pprof-window:
 	@python3 tools/pyroscope-top.py $(RESULTS)/pyroscope-$(STEP).json 30 | tee $(RESULTS)/pprof-top-$(STEP).txt
 
 pprof-heap:
-	go tool pprof -top -nodecount=30 -sample_index=inuse_space $(HOST_URL)/debug/pprof/heap 2>/dev/null | head -40
+	go tool pprof -top -nodecount=30 -sample_index=inuse_space http://localhost:8080/debug/pprof/heap 2>/dev/null | head -40
 
 pg-reset:
 	@$(PSQL) -qc "SELECT pg_stat_statements_reset();" >/dev/null

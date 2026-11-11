@@ -11,10 +11,6 @@
       "type": "http",
       "url": "http://localhost:3200/api/mcp"
     },
-    "kubernetes": {
-      "command": "npx",
-      "args": ["-y", "kubernetes-mcp-server@0.0.67", "--kubeconfig", ".kube/agent-ro", "--read-only", "--toolsets", "core"]
-    },
     "grafana": {
       "command": "sh",
       "args": ["-c", "set -a; . ./.env.local; exec docker run --rm -i -e GRAFANA_URL=http://host.docker.internal:3000 -e GRAFANA_SERVICE_ACCOUNT_TOKEN grafana/mcp-grafana:1.6.0 -t stdio --disable-write"]

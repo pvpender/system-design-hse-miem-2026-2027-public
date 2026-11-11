@@ -10,22 +10,26 @@ import (
 	"github.com/nikolaysavelev/soldout/internal/booking/api"
 )
 
-// Hold — удержание места.
+// Hold — удержание места с зафиксированными номером и ценой.
 type Hold struct {
-	ID        uuid.UUID
-	EventID   uuid.UUID
-	SeatID    int64
-	UserID    uuid.UUID
-	Status    api.HoldStatus
-	ExpiresAt time.Time
-	CreatedAt time.Time
+	ID            uuid.UUID
+	EventID       uuid.UUID
+	SectorID      uuid.UUID
+	SeatID        int64
+	UserID        uuid.UUID
+	Status        api.HoldStatus
+	PriceSequence int64
+	PriceMinor    int64
+	ExpiresAt     time.Time
+	CreatedAt     time.Time
 }
 
-// NewHold создаёт активный hold на ttl.
-func NewHold(eventID uuid.UUID, seatID int64, userID uuid.UUID, now time.Time, ttl time.Duration) Hold {
+// NewHold создаёт активный hold на ttl с атомарно выделенной ценой.
+func NewHold(eventID, sectorID uuid.UUID, seatID int64, userID uuid.UUID, price PriceReservation, now time.Time, ttl time.Duration) Hold {
 	return Hold{
-		ID: uuid.New(), EventID: eventID, SeatID: seatID, UserID: userID,
-		Status: api.HoldActive, ExpiresAt: now.Add(ttl), CreatedAt: now,
+		ID: uuid.New(), EventID: eventID, SectorID: sectorID, SeatID: seatID, UserID: userID,
+		Status: api.HoldActive, PriceSequence: price.Sequence, PriceMinor: price.PriceMinor,
+		ExpiresAt: now.Add(ttl), CreatedAt: now,
 	}
 }
 
@@ -61,5 +65,6 @@ func CanHoldMore(current int) bool { return current < api.MaxTicketsPerUser }
 
 // ToAPI — DTO.
 func (h Hold) ToAPI() api.Hold {
-	return api.Hold{ID: h.ID, EventID: h.EventID, SeatID: h.SeatID, UserID: h.UserID, Status: h.Status, ExpiresAt: h.ExpiresAt, CreatedAt: h.CreatedAt}
+	return api.Hold{ID: h.ID, EventID: h.EventID, SeatID: h.SeatID, UserID: h.UserID, Status: h.Status,
+		PriceSequence: h.PriceSequence, PriceMinor: h.PriceMinor, ExpiresAt: h.ExpiresAt, CreatedAt: h.CreatedAt}
 }

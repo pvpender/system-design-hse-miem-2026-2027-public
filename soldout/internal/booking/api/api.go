@@ -41,14 +41,15 @@ const (
 // TopicSeatState — топик событий изменения статуса места (platform/eventbus).
 const TopicSeatState = "booking.seat_state"
 
-// SeatStateChanged публикуется booking после commit: место удержано (held), продано (sold) или освобождено (free).
+// SeatStateChanged записывается booking в outbox в транзакции изменения hold.
 // Подписчик — catalog (проекция карты зала). Версия сектора считается подписчиком в БД, не здесь.
 type SeatStateChanged struct {
-	EventID uuid.UUID
-	SeatID  int64
-	State   SeatState
-	HoldID  uuid.UUID
-	At      time.Time
+	ID      uuid.UUID `json:"id"`
+	EventID uuid.UUID `json:"event_id"`
+	SeatID  int64     `json:"seat_id"`
+	State   SeatState `json:"state"`
+	HoldID  uuid.UUID `json:"hold_id"`
+	At      time.Time `json:"at"`
 }
 
 // Topic — для eventbus.
@@ -58,6 +59,17 @@ func (SeatStateChanged) Topic() string { return TopicSeatState }
 func (e SeatStateChanged) Key() string {
 	return e.EventID.String() + ":" + strconv.FormatInt(e.SeatID, 10)
 }
+
+const (
+	AggregateSeat             = "seat"
+	EventTypeSeatStateChanged = "SeatStateChanged"
+)
+
+// OutboxID, AggregateType, AggregateID, EventType — platform/outbox.Event.
+func (e SeatStateChanged) OutboxID() uuid.UUID   { return e.ID }
+func (e SeatStateChanged) AggregateType() string { return AggregateSeat }
+func (e SeatStateChanged) AggregateID() string   { return e.Key() }
+func (e SeatStateChanged) EventType() string     { return EventTypeSeatStateChanged }
 
 // OrderPaidEvent — событие «заказ оплачен» (занятие 4). Имя OrderPaid занято статусом заказа. Пишется в outbox в транзакции pay (сразу после MarkPaid),
 // доставляется Debezium → Kafka (топик outbox.event.order, ключ order_id) потребителям: notifier (письмо),
@@ -90,13 +102,15 @@ const MaxTicketsPerUser = 4
 
 // Hold — удержание места.
 type Hold struct {
-	ID        uuid.UUID  `json:"id"`
-	EventID   uuid.UUID  `json:"event_id"`
-	SeatID    int64      `json:"seat_id"`
-	UserID    uuid.UUID  `json:"user_id"`
-	Status    HoldStatus `json:"status"`
-	ExpiresAt time.Time  `json:"expires_at"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID            uuid.UUID  `json:"id"`
+	EventID       uuid.UUID  `json:"event_id"`
+	SeatID        int64      `json:"seat_id"`
+	UserID        uuid.UUID  `json:"user_id"`
+	Status        HoldStatus `json:"status"`
+	PriceSequence int64      `json:"price_sequence"`
+	PriceMinor    int64      `json:"price_minor"`
+	ExpiresAt     time.Time  `json:"expires_at"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
 
 // Order — заказ.
@@ -153,6 +167,7 @@ var (
 	ErrPaymentFailed       = errors.New("booking: оплата отклонена")
 	ErrIdempotencyConflict = errors.New("booking: Idempotency-Key уже использован с другими параметрами")
 	ErrValidation          = errors.New("booking: некорректные данные")
+	ErrPriceOverflow       = errors.New("booking: цена превышает допустимый диапазон")
 	ErrAdmissionRequired   = errors.New("booking: нужен действующий токен допуска (X-Admission-Token)")
 )
 

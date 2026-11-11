@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: soldout API
-  version: "1.1.0-lesson-2"
+  version: "1.2.0-v2"
   description: |
     HTTP API системы продажи билетов `soldout` (модульный монолит, занятие 1).
     Аутентификации нет (появится на занятии 6 через Gravitee + Keycloak). Все мутирующие операции
@@ -106,6 +106,7 @@ paths:
     post:
       tags: [booking]
       summary: Удержать место (hold на 10 минут)
+      description: Номер и цена сектора атомарно выделяются в Valkey и фиксируются в hold до оплаты.
       parameters:
         - name: X-Admission-Token
           in: header
@@ -341,6 +342,8 @@ components:
         seat_id: { type: integer, format: int64 }
         user_id: { type: string, format: uuid }
         status: { type: string, enum: [active, released, confirmed] }
+        price_sequence: { type: integer, format: int64, minimum: 1, description: Атомарно выделенный номер в секторе }
+        price_minor: { type: integer, format: int64, minimum: 1, description: Зафиксированная цена в копейках }
         expires_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
     Order:

@@ -13,62 +13,10 @@
  "panels": [
   {
    "type": "timeseries",
-   "title": "RPS по репликам soldout",
-   "gridPos": {
-    "x": 0,
-    "y": 0,
-    "w": 12,
-    "h": 6
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "targets": [
-    {
-     "expr": "sum by (instance) (rate(http_requests_total{job=\"soldout\"}[30s]))",
-     "legendFormat": "{{instance}}",
-     "refId": "A"
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
-   "title": "Реплики: soldout, notifier; CPU реплик soldout, ядер",
-   "gridPos": {
-    "x": 12,
-    "y": 0,
-    "w": 12,
-    "h": 6
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "targets": [
-    {
-     "expr": "count(up{job=\"soldout\"} == 1)",
-     "legendFormat": "реплик soldout",
-     "refId": "A"
-    },
-    {
-     "expr": "count(up{job=\"notifier\"} == 1)",
-     "legendFormat": "реплик notifier",
-     "refId": "B"
-    },
-    {
-     "expr": "rate(process_cpu_seconds_total{job=\"soldout\"}[30s])",
-     "legendFormat": "CPU {{instance}}",
-     "refId": "C"
-    }
-   ]
-  },
-  {
-   "type": "timeseries",
    "title": "RPS по маршрутам",
    "gridPos": {
     "x": 0,
-    "y": 6,
+    "y": 0,
     "w": 12,
     "h": 8
    },
@@ -94,7 +42,7 @@
    "title": "Ошибки 5xx/с по маршрутам",
    "gridPos": {
     "x": 12,
-    "y": 6,
+    "y": 0,
     "w": 12,
     "h": 8
    },
@@ -120,7 +68,7 @@
    "title": "p99 латентность по маршрутам",
    "gridPos": {
     "x": 0,
-    "y": 14,
+    "y": 8,
     "w": 12,
     "h": 8
    },
@@ -143,10 +91,10 @@
   },
   {
    "type": "timeseries",
-   "title": "Пул pgx: сумма по репликам, лимит PgBouncer; ожидание acquire p99",
+   "title": "Пул pgx: занято / лимит; ожидание acquire p99",
    "gridPos": {
     "x": 12,
-    "y": 14,
+    "y": 8,
     "w": 12,
     "h": 8
    },
@@ -156,22 +104,17 @@
    },
    "targets": [
     {
-     "expr": "sum(pgxpool_acquired_conns)",
-     "legendFormat": "acquired, все реплики",
+     "expr": "pgxpool_acquired_conns",
+     "legendFormat": "acquired",
      "refId": "A"
     },
     {
-     "expr": "sum(pgxpool_max_conns)",
-     "legendFormat": "max, все реплики",
+     "expr": "pgxpool_max_conns",
+     "legendFormat": "max",
      "refId": "B"
     },
     {
-     "expr": "vector(20)",
-     "legendFormat": "PgBouncer default_pool_size",
-     "refId": "D"
-    },
-    {
-     "expr": "histogram_quantile(0.99, sum by (le) (rate(db_pool_acquire_wait_seconds_bucket[30s])))",
+     "expr": "histogram_quantile(0.99, rate(db_pool_acquire_wait_seconds_bucket[30s]))",
      "legendFormat": "acquire wait p99, s",
      "refId": "C"
     }
@@ -182,7 +125,7 @@
    "title": "SQL p99 по запросу",
    "gridPos": {
     "x": 0,
-    "y": 22,
+    "y": 16,
     "w": 12,
     "h": 8
    },
@@ -208,7 +151,7 @@
    "title": "Кэш карты зала: ops/с",
    "gridPos": {
     "x": 12,
-    "y": 22,
+    "y": 16,
     "w": 12,
     "h": 8
    },
@@ -229,7 +172,7 @@
    "title": "Контенция hold: исходы/с",
    "gridPos": {
     "x": 0,
-    "y": 30,
+    "y": 24,
     "w": 12,
     "h": 8
    },
@@ -250,7 +193,7 @@
    "title": "Шина событий",
    "gridPos": {
     "x": 12,
-    "y": 30,
+    "y": 24,
     "w": 12,
     "h": 8
    },
@@ -271,7 +214,7 @@
     },
     {
      "expr": "eventbus_queue_depth",
-     "legendFormat": "depth {{instance}}",
+     "legendFormat": "depth",
      "refId": "C"
     }
    ]
@@ -281,7 +224,7 @@
    "title": "Go: память (heap, GOMEMLIMIT) и GC",
    "gridPos": {
     "x": 0,
-    "y": 38,
+    "y": 32,
     "w": 12,
     "h": 8
    },
@@ -292,17 +235,17 @@
    "targets": [
     {
      "expr": "go_memstats_heap_alloc_bytes",
-     "legendFormat": "heap_alloc {{instance}}",
+     "legendFormat": "heap_alloc",
      "refId": "A"
     },
     {
      "expr": "go_memstats_heap_sys_bytes",
-     "legendFormat": "heap_sys {{instance}}",
+     "legendFormat": "heap_sys",
      "refId": "B"
     },
     {
      "expr": "go_memstats_next_gc_bytes",
-     "legendFormat": "next_gc {{instance}}",
+     "legendFormat": "next_gc",
      "refId": "C"
     }
    ],
@@ -317,7 +260,7 @@
    "title": "Go: горутины, GOMAXPROCS, GC/с",
    "gridPos": {
     "x": 12,
-    "y": 38,
+    "y": 32,
     "w": 12,
     "h": 8
    },
@@ -328,12 +271,12 @@
    "targets": [
     {
      "expr": "go_goroutines",
-     "legendFormat": "goroutines {{instance}}",
+     "legendFormat": "goroutines",
      "refId": "A"
     },
     {
      "expr": "go_sched_gomaxprocs_threads",
-     "legendFormat": "gomaxprocs {{instance}}",
+     "legendFormat": "gomaxprocs",
      "refId": "B"
     },
     {
@@ -348,7 +291,7 @@
    "title": "holds_active и expirer batch p99",
    "gridPos": {
     "x": 0,
-    "y": 46,
+    "y": 40,
     "w": 12,
     "h": 8
    },
@@ -358,7 +301,7 @@
    },
    "targets": [
     {
-     "expr": "max(holds_active)",
+     "expr": "holds_active",
      "legendFormat": "holds_active",
      "refId": "A"
     },
@@ -374,7 +317,7 @@
    "title": "503 db_busy / timeouts acquire",
    "gridPos": {
     "x": 12,
-    "y": 46,
+    "y": 40,
     "w": 12,
     "h": 8
    },

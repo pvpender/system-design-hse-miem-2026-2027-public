@@ -19,6 +19,3 @@
 # результаты прогонов (кроме выложенных в hw/*/artifacts)
 /soldout/k6/results/
 /soldout/tmp/
-
-# kubeconfig агента (make kubeconfig-ro): токен ServiceAccount
-/soldout/.kube/

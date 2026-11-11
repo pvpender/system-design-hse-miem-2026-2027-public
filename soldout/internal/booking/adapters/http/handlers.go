@@ -145,6 +145,8 @@ func mapErr(err error) error {
 		return httpx.Wrap(http.StatusConflict, "seat_held", err)
 	case errors.Is(err, api.ErrSeatSold):
 		return httpx.Wrap(http.StatusConflict, "seat_sold", err)
+	case errors.Is(err, api.ErrPriceOverflow):
+		return httpx.Wrap(http.StatusConflict, "price_overflow", err)
 	case errors.Is(err, api.ErrHoldLimit):
 		return httpx.Wrap(http.StatusUnprocessableEntity, "hold_limit", err)
 	case errors.Is(err, api.ErrSalesClosed):

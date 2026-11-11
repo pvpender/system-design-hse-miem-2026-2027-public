@@ -28,7 +28,6 @@ type Config struct {
 	HoldTTL           time.Duration
 	ExpirerInterval   time.Duration
 	AdmissionTTL      time.Duration
-	TicketPriceMinor  int64 // цена билета в копейках; в модели данных цен нет — известное упрощение L1
 	LogLevel          string
 	LogFormat         string
 	ShutdownTimeout   time.Duration
@@ -94,9 +93,6 @@ func FromEnv() (Config, error) {
 	if c.AdmissionTTL, err = durEnv("ADMISSION_TTL", 15*time.Minute); err != nil {
 		return c, err
 	}
-	if c.TicketPriceMinor, err = int64Env("TICKET_PRICE_MINOR", 500000); err != nil {
-		return c, err
-	}
 	if c.ShutdownTimeout, err = durEnv("SHUTDOWN_TIMEOUT", 10*time.Second); err != nil {
 		return c, err
 	}
@@ -155,18 +151,6 @@ func intEnv(key string, def int) (int, error) {
 func int32Env(key string, def int32) (int32, error) {
 	n, err := intEnv(key, int(def))
 	return int32(n), err
-}
-
-func int64Env(key string, def int64) (int64, error) {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		return def, nil
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("config: %s=%q: %w", key, v, err)
-	}
-	return n, nil
 }
 
 func floatEnv(key string, def float64) (float64, error) {

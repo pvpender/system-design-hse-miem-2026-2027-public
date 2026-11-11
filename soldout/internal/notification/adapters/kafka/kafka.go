@@ -5,11 +5,6 @@
 // сообщения. Медленное письмо или повторы одного сообщения не задерживают остальные, но и не дают закоммитить
 // то, что не обработано: после падения придут повторы (их гасит идемпотентность), потерь нет.
 // Порядок гарантирован только внутри ключа (order_id) — и только до параллельной обработки (ADR-003).
-//
-// Ребаланс (занятие 5: реплики и автоскейлинг по лагу). Когда группа забирает партицию, потребитель перестаёт
-// начинать её сообщения, дожидается только уже начатых и коммитит отметку: партиция переходит к новой реплике
-// за секунды. Ждать все начатые сообщения всех партиций нельзя: цикл опроса продолжает начинать новые, ребаланс
-// не завершается, и новая реплика простаивает до конца очереди.
 package kafka
 
 import (
@@ -41,22 +36,15 @@ type Consumer struct {
 	opts     Options
 	logger   *slog.Logger
 	tracker  *tracker
-	gate     *gate
 	inflight sync.WaitGroup
 }
-
-// Сколько ждём начатые сообщения: при отзыве партиции и при остановке процесса (меньше terminationGracePeriod пода).
-const (
-	revokeWait   = 15 * time.Second
-	shutdownWait = 15 * time.Second
-)
 
 // New подключается к Kafka.
 func New(opts Options, logger *slog.Logger) (*Consumer, error) {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 256
 	}
-	c := &Consumer{opts: opts, logger: logger, tracker: newTracker(), gate: newGate()}
+	c := &Consumer{opts: opts, logger: logger, tracker: newTracker()}
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(opts.Brokers...),
 		kgo.ConsumerGroup(opts.Group),
@@ -66,28 +54,12 @@ func New(opts Options, logger *slog.Logger) (*Consumer, error) {
 		kgo.FetchMaxWait(100*time.Millisecond),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 		kgo.ClientID("notifier"),
-		// перед отдачей партиций: новых сообщений этих партиций не начинаем, начатые дожидаемся, отметку коммитим
-		kgo.OnPartitionsRevoked(func(ctx context.Context, cl *kgo.Client, revoked map[string][]int32) {
-			parts := revoked[opts.Topic]
-			c.gate.close(parts)
-			waitCtx, cancel := context.WithTimeout(ctx, revokeWait)
-			defer cancel()
-			if !c.gate.wait(waitCtx, parts) {
-				logger.Warn("kafka: отзыв партиций, начатые сообщения не завершились за отведённое время", "partitions", parts)
-			}
+		// перед отдачей партиций (рестарт, ребаланс) ждём начатые сообщения и коммитим отметку
+		kgo.OnPartitionsRevoked(func(ctx context.Context, cl *kgo.Client, _ map[string][]int32) {
+			c.inflight.Wait()
 			if err := cl.CommitMarkedOffsets(ctx); err != nil {
 				logger.Warn("kafka: commit при отзыве партиций", "err", err)
 			}
-			c.tracker.reset(parts)
-			logger.Info("kafka: партиции отданы", "partitions", parts)
-		}),
-		kgo.OnPartitionsLost(func(_ context.Context, _ *kgo.Client, lost map[string][]int32) {
-			c.gate.close(lost[opts.Topic])
-			c.tracker.reset(lost[opts.Topic])
-		}),
-		kgo.OnPartitionsAssigned(func(_ context.Context, _ *kgo.Client, assigned map[string][]int32) {
-			c.gate.open(assigned[opts.Topic])
-			logger.Info("kafka: партиции получены", "partitions", assigned[opts.Topic])
 		}),
 	)
 	if err != nil {
@@ -97,8 +69,7 @@ func New(opts Options, logger *slog.Logger) (*Consumer, error) {
 	return c, nil
 }
 
-// Close — фиксирует отмеченные смещения и закрывает клиента: участник выходит из группы сам (LeaveGroup),
-// партиции переходят к остальным репликам сразу, а не через session timeout.
+// Close — фиксирует отмеченные смещения и закрывает клиента.
 func (c *Consumer) Close() {
 	c.inflight.Wait()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -110,27 +81,13 @@ func (c *Consumer) Close() {
 // Ping — проверка соединения с брокером (readyz).
 func (c *Consumer) Ping(ctx context.Context) error { return c.cl.Ping(ctx) }
 
-// Run — цикл опроса до отмены ctx. Начатые сообщения при остановке дорабатывают (до shutdownWait): обработчик
-// получает контекст, который отмена ctx не трогает, иначе SIGTERM обрывал бы письма на полпути и они уходили бы повторно.
+// Run — цикл опроса до отмены ctx.
 func (c *Consumer) Run(ctx context.Context, handle func(context.Context, app.Message) error) error {
 	sem := make(chan struct{}, c.opts.Concurrency)
-	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancelWork()
-	drain := func() {
-		done := make(chan struct{})
-		go func() { c.inflight.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(shutdownWait):
-			c.logger.Warn("kafka: остановка, начатые сообщения прерваны", "timeout", shutdownWait.String())
-			cancelWork()
-			<-done
-		}
-	}
 	for {
 		fetches := c.cl.PollRecords(ctx, c.opts.Concurrency)
 		if ctx.Err() != nil {
-			drain()
+			c.inflight.Wait()
 			return nil
 		}
 		fetches.EachError(func(t string, p int32, err error) {
@@ -140,18 +97,13 @@ func (c *Consumer) Run(ctx context.Context, handle func(context.Context, app.Mes
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
-				drain()
+				c.inflight.Wait()
 				return nil
-			}
-			if !c.gate.enter(r.Partition) { // партицию забирает группа: сообщение прочитает новый владелец
-				<-sem
-				continue
 			}
 			c.tracker.start(r)
 			c.inflight.Add(1)
 			go func(r *kgo.Record) {
-				defer func() { <-sem; c.gate.leave(r.Partition); c.inflight.Done() }()
-				ctx := workCtx
+				defer func() { <-sem; c.inflight.Done() }()
 				if err := handle(ctx, toMessage(r)); err != nil {
 					// не обработано и не в DLQ: отметка партиции не пройдёт это смещение — лаг растёт, это видно
 					c.logger.ErrorContext(ctx, "kafka: сообщение не обработано, смещение не фиксируется", "partition", r.Partition, "offset", r.Offset, "err", err)
@@ -205,80 +157,6 @@ func (t *tracker) finish(r *kgo.Record) (int64, bool) {
 		return t.maxDone[r.Partition] + 1, true // всё начатое обработано
 	}
 	return low, true // коммит до первого незавершённого
-}
-
-// reset забывает партиции: после возврата партиции отсчёт начинается с зафиксированного смещения.
-func (t *tracker) reset(parts []int32) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for _, p := range parts {
-		delete(t.inflight, p)
-		delete(t.maxDone, p)
-	}
-}
-
-// gate — пропуск сообщений по партициям: закрытая партиция новых сообщений не начинает, wait ждёт начатые.
-type gate struct {
-	mu      sync.Mutex
-	closed  map[int32]bool
-	running map[int32]int
-}
-
-func newGate() *gate { return &gate{closed: map[int32]bool{}, running: map[int32]int{}} }
-
-// enter — можно ли начать сообщение партиции; true учитывает его как начатое.
-func (g *gate) enter(p int32) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.closed[p] {
-		return false
-	}
-	g.running[p]++
-	return true
-}
-
-func (g *gate) leave(p int32) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.running[p]--
-}
-
-func (g *gate) close(parts []int32) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	for _, p := range parts {
-		g.closed[p] = true
-	}
-}
-
-func (g *gate) open(parts []int32) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	for _, p := range parts {
-		delete(g.closed, p)
-	}
-}
-
-// wait ждёт, пока начатые сообщения партиций завершатся; false — контекст истёк раньше.
-func (g *gate) wait(ctx context.Context, parts []int32) bool {
-	t := time.NewTicker(20 * time.Millisecond)
-	defer t.Stop()
-	for {
-		g.mu.Lock()
-		busy := 0
-		for _, p := range parts {
-			busy += g.running[p]
-		}
-		g.mu.Unlock()
-		if busy == 0 {
-			return true
-		}
-		select {
-		case <-ctx.Done():
-			return false
-		case <-t.C:
-		}
-	}
 }
 
 func toMessage(r *kgo.Record) app.Message {

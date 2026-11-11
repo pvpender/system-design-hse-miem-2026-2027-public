@@ -8,13 +8,8 @@ $COMPOSE exec -T postgres psql -q -U soldout -d soldout -v ON_ERROR_STOP=1 -f - 
 COMPOSE="$COMPOSE" tools/cdc/topics.sh
 for i in $(seq 1 60); do curl -sf "$CONNECT/connectors" >/dev/null && break; sleep 2; done
 name=$(python3 -c 'import json; print(json.load(open("compose/debezium/outbox-connector.json"))["name"])')
-# Connect отвечает 409, пока перебалансирует задачи (например, после пересоздания PostgreSQL): повторяем
-for i in $(seq 1 10); do
-  python3 -c 'import json; print(json.dumps(json.load(open("compose/debezium/outbox-connector.json"))["config"]))' |
-    curl -sf -X PUT -H 'Content-Type: application/json' --data @- "$CONNECT/connectors/$name/config" >/dev/null && break
-  [ "$i" = 10 ] && { echo "connector $name: Connect не принял конфигурацию"; exit 1; }
-  sleep 3
-done
+python3 -c 'import json; print(json.dumps(json.load(open("compose/debezium/outbox-connector.json"))["config"]))' |
+  curl -sf -X PUT -H 'Content-Type: application/json' --data @- "$CONNECT/connectors/$name/config" >/dev/null
 # задача могла упасть на прошлой конфигурации — перезапускаем только упавшие
 curl -sf -X POST "$CONNECT/connectors/$name/restart?includeTasks=true&onlyFailed=true" >/dev/null || true
 for i in $(seq 1 30); do

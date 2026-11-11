@@ -75,31 +75,3 @@
 5. `uvx` — из `uv` (`curl -LsSf https://astral.sh/uv/install.sh | sh`); `--python 3.12 --with "mcp<2"` нужны, потому что `postgres-mcp` 0.3.x не собирается на Python 3.14 и не совместим с `mcp` 2.x.
 
 Проверка: в Claude Code `/mcp` показывает сервер `postgres` подключённым; первый запрос — «Покажи топ-5 запросов из pg_stat_statements по total_exec_time».
-
-## 9. Агент и кластер: git на запись, кластер на чтение (занятие 5)
-
-Правило курса (`soldout/docs/constitution.md` §8, ADR-004): агент меняет манифесты и чарт в git, `make lint-k8s` их проверяет, выкатку делает пайплайн или человек. В кластер агент ничего не применяет. Причина та же, что у restricted-режима Postgres MCP: ошибка агента должна остаться в diff, который можно прочитать и отклонить.
-
-Для диагностики агенту выдается доступ только на чтение:
-
-```bash
-cd soldout
-make kubeconfig-ro      # .kube/agent-ro: ServiceAccount agent-ro, токен на 24 часа
-```
-
-`deploy/rbac/agent-ro.yaml`: `get/list/watch` на pods, pods/log, events, deployments, replicasets, hpa, scaledobjects, pdb, ingresses, services, nodes и метрики. Секретов и ConfigMap в списке нет. Проверка: `kubectl --kubeconfig .kube/agent-ro apply -f ...` отвечает `Forbidden`.
-
-Два способа дать этот доступ агенту:
-
-1. **Kubernetes MCP** ([containers/kubernetes-mcp-server](https://github.com/containers/kubernetes-mcp-server)), уже в `soldout/.mcp.json`:
-
-   ```json
-   "kubernetes": { "command": "npx",
-     "args": ["-y", "kubernetes-mcp-server@0.0.67", "--kubeconfig", ".kube/agent-ro", "--read-only", "--toolsets", "core"] }
-   ```
-
-   Защита двойная: `--read-only` убирает изменяющие инструменты на стороне сервера, RBAC запрещает запись на стороне кластера. Полагаться только на флаг сервера нельзя.
-
-2. **Просто kubectl**: попросить агента работать командой `kubectl --kubeconfig .kube/agent-ro ...`. Подходит любому агенту с доступом к терминалу, MCP не нужен. Свой основной kubeconfig (`~/.kube/config` с правами администратора) агенту при этом лучше не оставлять в окружении: `KUBECONFIG=.kube/agent-ro` в сессии агента.
-
-Политики `deploy/policies/*.rego` для инфраструктуры играют ту же роль, что `go-arch-lint` для кода: агент может не знать правило, но проверка его остановит. Что агенты делают плохо в манифестах: `image: ...:latest`, забытые probes и limits, `replicas` рядом с HPA. Запись сессии занятия: `lessons/05/ai-session.md`.

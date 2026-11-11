@@ -20,8 +20,7 @@ PY
 
 case "${1:-}" in
 last)
-  # SOLDOUT_LOGS — команда логов soldout; в режиме k8s Makefile передаёт kubectl logs
-  id=$(${SOLDOUT_LOGS:-$COMPOSE logs --no-log-prefix soldout} 2>/dev/null | grep 'route=/v1/orders/{id}/pay\|"route":"/v1/orders/{id}/pay"' | tail -1 |
+  id=$($COMPOSE logs --no-log-prefix soldout 2>/dev/null | grep 'route=/v1/orders/{id}/pay\|"route":"/v1/orders/{id}/pay"' | tail -1 |
        sed -nE 's/.*trace_id[=":]+([0-9a-f]{32}).*/\1/p')
   [ -n "$id" ] || { echo "в логах soldout нет pay с trace_id: сначала make pay-demo"; exit 1; }
   echo "trace_id: $id"

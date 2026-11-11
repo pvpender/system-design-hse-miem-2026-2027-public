@@ -24,7 +24,8 @@ type Order struct {
 }
 
 // NewOrder собирает заказ из hold'ов. Правила: 1..4 hold, все usable, один пользователь, одно мероприятие.
-func NewOrder(holds []Hold, userID uuid.UUID, idempotencyKey string, pricePerSeatMinor int64, now time.Time) (Order, error) {
+// Сумма заказа — сумма цен, зафиксированных при создании hold'ов.
+func NewOrder(holds []Hold, userID uuid.UUID, idempotencyKey string, now time.Time) (Order, error) {
 	if len(holds) == 0 {
 		return Order{}, fmt.Errorf("%w: пустой список hold_ids", api.ErrValidation)
 	}
@@ -56,8 +57,8 @@ func NewOrder(holds []Hold, userID uuid.UUID, idempotencyKey string, pricePerSea
 		}
 		o.HoldIDs = append(o.HoldIDs, h.ID)
 		o.SeatIDs = append(o.SeatIDs, h.SeatID)
+		o.AmountMinor += h.PriceMinor
 	}
-	o.AmountMinor = int64(len(holds)) * pricePerSeatMinor
 	return o, nil
 }
 

@@ -103,6 +103,9 @@ services:
   prometheus:
     image: prom/prometheus:v3.6.0
     profiles: [obs]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver
     volumes:
       - ./compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:

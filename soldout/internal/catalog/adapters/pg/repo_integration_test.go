@@ -13,6 +13,7 @@ import (
 
 	catalogpg "github.com/nikolaysavelev/soldout/internal/catalog/adapters/pg"
 	"github.com/nikolaysavelev/soldout/internal/catalog/api"
+	"github.com/nikolaysavelev/soldout/internal/catalog/domain"
 	"github.com/nikolaysavelev/soldout/internal/platform/db"
 )
 
@@ -76,8 +77,11 @@ func TestApplySeatState_OrderIndependent(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			for _, s := range c.steps {
-				if _, _, err := repo.ApplySeatState(ctx, eventID, c.seat, s.state, s.hold); err != nil {
+			for i, s := range c.steps {
+				_, err := repo.ApplySeatStates(ctx, []domain.SeatStateChange{{
+					ID: uuid.New(), SourceSeq: int64(i + 1), EventID: eventID, SeatID: c.seat, State: s.state, HoldID: s.hold,
+				}})
+				if err != nil {
 					t.Fatal(err)
 				}
 			}
