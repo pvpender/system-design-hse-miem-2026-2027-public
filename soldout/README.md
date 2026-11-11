@@ -24,7 +24,6 @@ make test        # go test ./... — unit-тесты домена + интегр
 | `migrations/`, `seed/` | SQL-миграции (по модулям) и seed 3 × 40 000 мест; встроены в бинарник |
 | `api/openapi.yaml` | контракт HTTP API |
 | `spec/soldout.md` | спецификация системы (ФТ, НФТ, расчёт нагрузки, модули, инварианты) |
-| `docs/architecture.md` | верхнеуровневая архитектура и sequence-диаграммы ключевых сценариев |
 | `docs/constitution.md`, `AGENTS.md`, `CLAUDE.md` | правила для людей и агентов |
 | `docs/adr/ADR-001-modular-monolith.md` | решение о стартовой архитектуре и известные ограничения MVP |
 | `.go-arch-lint.yml` | архитектурные правила (`make lint-arch`) |

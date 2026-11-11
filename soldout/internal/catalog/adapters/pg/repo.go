@@ -4,6 +4,7 @@ package pg
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -61,13 +62,15 @@ func (r *Repo) GetEvent(ctx context.Context, id uuid.UUID) (domain.Event, error)
 	return scanEvent(r.db.QueryRow(ctx, "/* catalog.get_event */ SELECT "+eventCols+" FROM events WHERE id = $1", id))
 }
 
-// GetSeat — место с площадкой (через сектор).
+// GetSeat — место с площадкой и настройками цены сектора.
 func (r *Repo) GetSeat(ctx context.Context, id int64) (domain.Seat, error) {
 	var s domain.Seat
 	err := r.db.QueryRow(ctx, `/* catalog.get_seat */
-		SELECT s.id, s.sector_id, sec.venue_id, s.row_no, s.seat_no
+		SELECT s.id, s.sector_id, sec.venue_id, s.row_no, s.seat_no,
+		       sec.base_price_minor, sec.price_increase_percent, sec.price_step_size
 		FROM seats s JOIN sectors sec ON sec.id = s.sector_id
-		WHERE s.id = $1`, id).Scan(&s.ID, &s.SectorID, &s.VenueID, &s.RowNo, &s.SeatNo)
+		WHERE s.id = $1`, id).Scan(&s.ID, &s.SectorID, &s.VenueID, &s.RowNo, &s.SeatNo,
+		&s.Pricing.BasePriceMinor, &s.Pricing.IncreasePercent, &s.Pricing.StepSize)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return s, api.ErrSeatNotFound
 	}
@@ -215,47 +218,87 @@ func (r *Repo) SectorStates(ctx context.Context, eventID, sectorID uuid.UUID) ([
 	return states, version, tx.Commit(ctx)
 }
 
-// ApplySeatState — проекция + версия сектора в одной транзакции. free → строка удаляется.
-//
-// Применение не зависит от порядка событий одного места: при нескольких репликах held и sold приходят из шин
-// разных процессов. sold окончателен и не откатывается в held; free снимает только строку своего hold (или
-// строку без hold_id, записанную до миграции 0022), поэтому опоздавший free не стирает удержание следующего
-// покупателя.
-func (r *Repo) ApplySeatState(ctx context.Context, eventID uuid.UUID, seatID int64, state api.SeatStatus, holdID uuid.UUID) (uuid.UUID, int64, error) {
-	var sectorID uuid.UUID
-	var version int64
-	err := db.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, "/* catalog.seat_sector */ SELECT sector_id FROM seats WHERE id = $1", seatID).Scan(&sectorID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return api.ErrSeatNotFound
-			}
-			return fmt.Errorf("catalog/pg: seat sector: %w", err)
+// ApplySeatStates — одна set-based транзакция на batch. Дедупликация по id и high-watermark по seq
+// делают повторную доставку безопасной; free не удаляет high-watermark места.
+func (r *Repo) ApplySeatStates(ctx context.Context, changes []domain.SeatStateChange) ([]domain.SectorVersion, error) {
+	if len(changes) == 0 {
+		return nil, nil
+	}
+	payload, err := json.Marshal(changes)
+	if err != nil {
+		return nil, fmt.Errorf("catalog/pg: marshal seat changes: %w", err)
+	}
+	rows, err := r.pool.Query(ctx, `/* catalog.apply_seat_state_batch */
+		WITH input AS (
+			SELECT * FROM jsonb_to_recordset($1::jsonb)
+			AS x(id uuid, source_seq bigint, event_id uuid, seat_id bigint, state text)
+		),
+		inserted AS (
+			INSERT INTO catalog_processed_events(id) SELECT id FROM input ON CONFLICT DO NOTHING RETURNING id
+		),
+		fresh AS (
+			SELECT i.* FROM input i JOIN inserted p USING (id)
+		),
+		latest AS (
+			SELECT DISTINCT ON (event_id, seat_id) * FROM fresh
+			ORDER BY event_id, seat_id, source_seq DESC
+		),
+		resolved AS (
+			SELECT l.*, s.sector_id FROM latest l JOIN seats s ON s.id = l.seat_id
+		),
+		advanced AS (
+			INSERT INTO catalog_seat_projection_position(event_id, seat_id, last_source_seq)
+			SELECT event_id, seat_id, source_seq FROM resolved
+			ON CONFLICT (event_id, seat_id) DO UPDATE SET last_source_seq = EXCLUDED.last_source_seq
+			WHERE catalog_seat_projection_position.last_source_seq < EXCLUDED.last_source_seq
+			RETURNING event_id, seat_id, last_source_seq
+		),
+		changed AS (
+			SELECT r.* FROM resolved r JOIN advanced a USING (event_id, seat_id)
+		),
+		sector_changes AS (
+			SELECT event_id, sector_id, count(*) AS changes FROM changed GROUP BY event_id, sector_id
+		),
+		bumped AS (
+			INSERT INTO catalog_sector_version(event_id, sector_id, version, updated_at)
+			SELECT event_id, sector_id, changes, now() FROM sector_changes
+			ON CONFLICT (event_id, sector_id) DO UPDATE
+			SET version = catalog_sector_version.version + EXCLUDED.version, updated_at = now()
+			RETURNING event_id, sector_id, version
+		),
+		deleted AS (
+			DELETE FROM catalog_seat_state c USING changed ch
+			WHERE c.event_id = ch.event_id AND c.seat_id = ch.seat_id AND ch.state = 'free'
+			RETURNING c.event_id, c.seat_id
+		),
+		upserted AS (
+			INSERT INTO catalog_seat_state(event_id, seat_id, sector_id, state, version, updated_at)
+			SELECT ch.event_id, ch.seat_id, ch.sector_id, ch.state, b.version, now()
+			FROM changed ch JOIN bumped b USING (event_id, sector_id)
+			WHERE ch.state IN ('held', 'sold')
+			ON CONFLICT (event_id, seat_id) DO UPDATE
+			SET state = EXCLUDED.state, version = EXCLUDED.version, updated_at = now()
+			RETURNING event_id, seat_id
+		),
+		all_resolved AS (
+			SELECT DISTINCT i.event_id, i.seat_id, s.sector_id FROM input i JOIN seats s ON s.id = i.seat_id
+		)
+		SELECT DISTINCT a.event_id, a.sector_id, coalesce(b.version, v.version) AS version FROM all_resolved a
+		LEFT JOIN bumped b USING (event_id, sector_id)
+		LEFT JOIN catalog_sector_version v USING (event_id, sector_id)`, payload)
+	if err != nil {
+		return nil, fmt.Errorf("catalog/pg: apply seat state batch: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.SectorVersion
+	for rows.Next() {
+		var v domain.SectorVersion
+		if err := rows.Scan(&v.EventID, &v.SectorID, &v.Version); err != nil {
+			return nil, fmt.Errorf("catalog/pg: scan sector version: %w", err)
 		}
-		if err := tx.QueryRow(ctx, `/* catalog.bump_sector_version */
-			INSERT INTO catalog_sector_version (event_id, sector_id, version, updated_at) VALUES ($1, $2, 1, now())
-			ON CONFLICT (event_id, sector_id) DO UPDATE SET version = catalog_sector_version.version + 1, updated_at = now()
-			RETURNING version`, eventID, sectorID).Scan(&version); err != nil {
-			return fmt.Errorf("catalog/pg: bump version: %w", err)
-		}
-		if state == api.SeatFree {
-			_, err := tx.Exec(ctx, `/* catalog.projection_delete */ DELETE FROM catalog_seat_state
-				WHERE event_id = $1 AND seat_id = $2 AND state = 'held' AND (hold_id = $3 OR hold_id IS NULL)`, eventID, seatID, holdID)
-			if err != nil {
-				return fmt.Errorf("catalog/pg: projection delete: %w", err)
-			}
-			return nil
-		}
-		_, err := tx.Exec(ctx, `/* catalog.projection_upsert */
-			INSERT INTO catalog_seat_state (event_id, seat_id, sector_id, state, version, hold_id, updated_at) VALUES ($1, $2, $3, $4, $5, $6, now())
-			ON CONFLICT (event_id, seat_id) DO UPDATE SET state = EXCLUDED.state, version = EXCLUDED.version, hold_id = EXCLUDED.hold_id, updated_at = now()
-			WHERE EXCLUDED.state = 'sold' OR catalog_seat_state.state <> 'sold'`,
-			eventID, seatID, sectorID, state, version, holdID)
-		if err != nil {
-			return fmt.Errorf("catalog/pg: projection upsert: %w", err)
-		}
-		return nil
-	})
-	return sectorID, version, err
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 // VenueExists — есть ли площадка.

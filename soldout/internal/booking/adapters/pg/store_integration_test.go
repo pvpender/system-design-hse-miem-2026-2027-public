@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	bookingpg "github.com/nikolaysavelev/soldout/internal/booking/adapters/pg"
 	"github.com/nikolaysavelev/soldout/internal/booking/api"
 	"github.com/nikolaysavelev/soldout/internal/booking/app"
+	"github.com/nikolaysavelev/soldout/internal/booking/domain"
 	catalogapi "github.com/nikolaysavelev/soldout/internal/catalog/api"
 	"github.com/nikolaysavelev/soldout/internal/platform/db"
 	queueapi "github.com/nikolaysavelev/soldout/internal/queue/api"
@@ -57,8 +59,10 @@ func TestConcurrentHolds_ExactlyOneWins(t *testing.T) {
 
 	eventID := uuid.MustParse("10000000-0000-4000-8000-000000000001")
 	venueID := uuid.MustParse("20000000-0000-4000-8000-000000000001")
-	svc := app.New(bookingpg.New(pool), fakeCatalog{eventID: eventID, venueID: venueID}, fakeQueue{}, fakePayment{}, fakeTickets{},
-		app.Options{HoldTTL: time.Minute, TicketPriceMinor: 100}, slog.Default())
+	sectorID := uuid.MustParse("30000000-0000-4000-8000-000000000001")
+	store := bookingpg.New(pool)
+	svc := app.New(store, fakeCatalog{eventID: eventID, venueID: venueID, sectorID: sectorID}, fakeQueue{}, fakePayment{}, fakeTickets{},
+		app.Options{HoldTTL: time.Minute, Pricing: &fakePricing{}}, slog.Default())
 
 	const workers = 20
 	var wg sync.WaitGroup
@@ -155,9 +159,25 @@ func TestConcurrentHolds_ExactlyOneWins(t *testing.T) {
 	if _, err := svc.CreateHold(ctx, api.CreateHoldInput{EventID: eventID, SeatID: 101, UserID: uuid.New()}); !errors.Is(err, api.ErrAdmissionRequired) {
 		t.Fatalf("без токена ожидался ErrAdmissionRequired: %v", err)
 	}
+
+	// Все успешные переходы записаны в seat-outbox; конфликтные/повторные операции их не дублируют.
+	var seatEvents int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE aggregatetype = 'seat'").Scan(&seatEvents); err != nil || seatEvents != 8 {
+		t.Fatalf("ожидалось 8 seat-событий (hold/release/pay), получено %d, %v", seatEvents, err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE holds SET expires_at = $1 WHERE seat_id = 10 AND status = 'active'", time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	released, err := store.ExpireHoldsBatch(ctx, time.Now(), 100)
+	if err != nil || len(released) != 1 {
+		t.Fatalf("expire должен атомарно освободить одно место: %+v, %v", released, err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE aggregatetype = 'seat' AND type = 'SeatStateChanged'").Scan(&seatEvents); err != nil || seatEvents != 9 {
+		t.Fatalf("expire должен добавить одно free-событие: %d, %v", seatEvents, err)
+	}
 }
 
-type fakeCatalog struct{ eventID, venueID uuid.UUID }
+type fakeCatalog struct{ eventID, venueID, sectorID uuid.UUID }
 
 func (f fakeCatalog) ListEvents(context.Context) ([]catalogapi.Event, error) { return nil, nil }
 func (f fakeCatalog) GetEvent(_ context.Context, id uuid.UUID) (catalogapi.Event, error) {
@@ -167,7 +187,8 @@ func (f fakeCatalog) GetEvent(_ context.Context, id uuid.UUID) (catalogapi.Event
 	return catalogapi.Event{ID: id, VenueID: f.venueID, SalesState: catalogapi.SalesOpen}, nil
 }
 func (f fakeCatalog) GetSeat(_ context.Context, seatID int64) (catalogapi.Seat, error) {
-	return catalogapi.Seat{ID: seatID, VenueID: f.venueID}, nil
+	return catalogapi.Seat{ID: seatID, SectorID: f.sectorID, VenueID: f.venueID,
+		Pricing: catalogapi.SectorPricing{BasePriceMinor: 100, IncreasePercent: 0, StepSize: 100}}, nil
 }
 func (f fakeCatalog) SeatMap(context.Context, uuid.UUID) (catalogapi.SeatMap, error) {
 	return catalogapi.SeatMap{}, nil
@@ -180,6 +201,14 @@ func (f fakeCatalog) CreateEvent(context.Context, catalogapi.CreateEventInput) (
 }
 func (f fakeCatalog) OpenSales(context.Context, uuid.UUID) (catalogapi.Event, error) {
 	return catalogapi.Event{}, nil
+}
+
+type fakePricing struct{ sequence atomic.Int64 }
+
+func (p *fakePricing) ReservePrice(_ context.Context, _ uuid.UUID, basePriceMinor int64, increasePercent int, stepSize int64) (domain.PriceReservation, error) {
+	sequence := p.sequence.Add(1)
+	price, err := domain.PriceForSequence(basePriceMinor, increasePercent, stepSize, sequence)
+	return domain.PriceReservation{Sequence: sequence, PriceMinor: price}, err
 }
 
 type fakeQueue struct{}

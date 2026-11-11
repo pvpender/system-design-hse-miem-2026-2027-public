@@ -2,7 +2,6 @@
 # pay-demo: один проход покупки curl'ом — join → hold (место SEAT, по умолчанию 777 мероприятия 2) → order → pay.
 # Печатает время каждого вызова (curl -w). Если место уже продано прошлым прогоном, берёт следующее свободное.
 set -euo pipefail
-export LC_ALL=C   # printf %f и python: десятичная точка при любой локали терминала
 BASE=${BASE_URL:-http://localhost:8080}
 EVENT_NO=${EVENT_NO:-2}
 EVENT=10000000-0000-4000-8000-$(printf '%012x' "$EVENT_NO")

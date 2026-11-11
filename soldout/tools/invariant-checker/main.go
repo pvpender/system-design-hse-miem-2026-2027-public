@@ -5,6 +5,8 @@
 //	I3  у каждого paid заказа есть ticket на каждую позицию
 //	I4  у пользователя ≤ 4 билетов на мероприятие
 //	I5  (с занятия 3) каждому paid заказу соответствует ровно одна notification — включается флагом -i5
+//	I6  сумма заказа равна сумме зафиксированных цен, номера и цены hold соответствуют сектору
+//	I7  проекция карты совпадает с holds — управляется флагом -projection
 //
 // Выход: таблица; код возврата 1 при нарушении.
 package main
@@ -47,7 +49,27 @@ var invariants = []invariant{
 		) d`},
 }
 
-var invariantI6 = invariant{"I6", "проекция карты (catalog_seat_state) совпадает с истиной (holds) — с занятия 2", `
+var invariantI6 = invariant{"I6", "цены и номера hold соответствуют сектору, сумма заказа равна сумме цен hold", `
+		SELECT
+			(SELECT count(*) FROM (
+				SELECT o.id FROM orders o
+				JOIN order_items oi ON oi.order_id = o.id
+				JOIN holds h ON h.id = oi.hold_id
+				GROUP BY o.id, o.amount HAVING o.amount * 100 <> sum(h.price_minor)
+			) wrong_amount)
+		+	(SELECT count(*) FROM (
+				SELECT sector_id, price_sequence FROM holds
+				GROUP BY sector_id, price_sequence HAVING count(*) > 1
+			) duplicate_sequence)
+		+	(SELECT count(*) FROM holds h JOIN seats st ON st.id = h.seat_id
+				WHERE h.sector_id <> st.sector_id)
+		+	(SELECT count(*) FROM holds h JOIN sectors s ON s.id = h.sector_id
+				WHERE h.price_minor <> round(s.base_price_minor * power(
+					1 + s.price_increase_percent::numeric / 100,
+					floor((h.price_sequence - 1)::numeric / s.price_step_size)
+				))::bigint)`}
+
+var invariantI7 = invariant{"I7", "проекция карты (catalog_seat_state) совпадает с истиной (holds) — с занятия 2", `
 		SELECT (SELECT count(*) FROM (
 			SELECT h.event_id, h.seat_id, CASE h.status WHEN 'confirmed' THEN 'sold' ELSE 'held' END AS state
 			FROM holds h WHERE h.status IN ('active','confirmed')
@@ -72,7 +94,7 @@ var invariantI5 = invariant{"I5", "каждому paid заказу — ровн
 func main() {
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "строка подключения PostgreSQL (или DATABASE_URL)")
 	withI5 := flag.Bool("i5", false, "проверять I5 (уведомления; актуально с занятия 3)")
-	withI6 := flag.Bool("projection", true, "проверять I6: проекция карты зала совпадает с holds (занятие 2; проекция догоняет события за секунды)")
+	withI7 := flag.Bool("projection", true, "проверять I7: проекция карты зала совпадает с holds (занятие 2; проекция догоняет события за секунды)")
 	flag.Parse()
 	if *dsn == "" {
 		fmt.Fprintln(os.Stderr, "нужен -dsn или DATABASE_URL")
@@ -88,9 +110,9 @@ func main() {
 	}
 	defer pool.Close()
 
-	checks := invariants
-	if *withI6 {
-		checks = append(checks, invariantI6)
+	checks := append(invariants, invariantI6)
+	if *withI7 {
+		checks = append(checks, invariantI7)
 	}
 	if *withI5 {
 		checks = append(checks, invariantI5)

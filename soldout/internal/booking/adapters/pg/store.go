@@ -21,7 +21,8 @@ import (
 
 // Store — реализация app.Store поверх пула.
 type Store struct {
-	pool *db.Pool
+	pool       *db.Pool
+	seatOutbox *outbox.Writer
 	queries
 }
 
@@ -33,7 +34,10 @@ func WithOutbox(w *outbox.Writer) Option { return func(s *Store) { s.outbox = w 
 
 // New создаёт хранилище.
 func New(pool *db.Pool, opts ...Option) *Store {
-	s := &Store{pool: pool, queries: queries{db: pool, outbox: outbox.NewWriter(outbox.Options{DeleteAfterInsert: true})}}
+	seatOutbox := outbox.NewWriter(outbox.Options{DeleteAfterInsert: false})
+	s := &Store{pool: pool, seatOutbox: seatOutbox, queries: queries{
+		db: pool, outbox: outbox.NewWriter(outbox.Options{DeleteAfterInsert: true}), seatOutbox: seatOutbox,
+	}}
 	for _, o := range opts {
 		o(s)
 	}
@@ -43,19 +47,25 @@ func New(pool *db.Pool, opts ...Option) *Store {
 // InTx выполняет fn в транзакции.
 func (s *Store) InTx(ctx context.Context, fn func(tx app.Tx) error) error {
 	return db.WithTx(ctx, s.pool, func(tx pgx.Tx) error {
-		return fn(&queries{db: tx, outbox: s.outbox})
+		return fn(&queries{db: tx, outbox: s.outbox, seatOutbox: s.seatOutbox})
 	})
 }
 
 // queries — запросы, одинаковые для пула и транзакции.
 type queries struct {
-	db     db.DBTX
-	outbox *outbox.Writer
+	db         db.DBTX
+	outbox     *outbox.Writer
+	seatOutbox *outbox.Writer
 }
 
 // AppendOutbox — событие в outbox в текущей транзакции (platform/outbox).
 func (q *queries) AppendOutbox(ctx context.Context, e api.OrderPaidEvent) error {
 	return q.outbox.Append(ctx, q.db, e)
+}
+
+// AppendSeatStateOutbox — событие карты зала остаётся в outbox до обработки projector'ом.
+func (q *queries) AppendSeatStateOutbox(ctx context.Context, e api.SeatStateChanged) error {
+	return q.seatOutbox.Append(ctx, q.db, e)
 }
 
 var _ app.Tx = (*queries)(nil)
@@ -96,9 +106,12 @@ func (q *queries) SeatSold(ctx context.Context, eventID uuid.UUID, seatID int64)
 // InsertHold — новый hold; нарушение uniq_active_hold / holds_taken_uidx → ErrSeatHeld.
 func (q *queries) InsertHold(ctx context.Context, h domain.Hold) error {
 	_, err := q.db.Exec(ctx, `/* booking.insert_hold */
-		INSERT INTO holds (id, event_id, seat_id, user_id, status, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		h.ID, h.EventID, h.SeatID, h.UserID, h.Status, h.ExpiresAt, h.CreatedAt)
+		INSERT INTO holds (id, event_id, sector_id, seat_id, user_id, status, price_sequence, price_minor, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		h.ID, h.EventID, h.SectorID, h.SeatID, h.UserID, h.Status, h.PriceSequence, h.PriceMinor, h.ExpiresAt, h.CreatedAt)
+	if db.IsUniqueViolation(err, "holds_sector_price_sequence_uidx") {
+		return fmt.Errorf("booking/pg: номер цены уже сохранён, счётчик Valkey рассинхронизирован: %w", err)
+	}
 	if db.IsUniqueViolation(err, "") {
 		return api.ErrSeatHeld
 	}
@@ -108,11 +121,11 @@ func (q *queries) InsertHold(ctx context.Context, h domain.Hold) error {
 	return nil
 }
 
-const holdCols = "id, event_id, seat_id, user_id, status, expires_at, created_at"
+const holdCols = "id, event_id, sector_id, seat_id, user_id, status, price_sequence, price_minor, expires_at, created_at"
 
 func scanHold(row pgx.Row) (domain.Hold, error) {
 	var h domain.Hold
-	err := row.Scan(&h.ID, &h.EventID, &h.SeatID, &h.UserID, &h.Status, &h.ExpiresAt, &h.CreatedAt)
+	err := row.Scan(&h.ID, &h.EventID, &h.SectorID, &h.SeatID, &h.UserID, &h.Status, &h.PriceSequence, &h.PriceMinor, &h.ExpiresAt, &h.CreatedAt)
 	return h, err
 }
 
@@ -315,26 +328,38 @@ func (q *queries) SoldCount(ctx context.Context, eventID uuid.UUID) (int, error)
 
 // ExpireHoldsBatch — до limit просроченных active hold → released одним UPDATE; конкурентные
 // транзакции (pay, release) не блокируются: строки берутся FOR UPDATE SKIP LOCKED.
-func (q *queries) ExpireHoldsBatch(ctx context.Context, now time.Time, limit int) ([]app.ReleasedHold, error) {
-	rows, err := q.db.Query(ctx, `/* booking.expire_holds_batch */
-		WITH batch AS (
-			SELECT id FROM holds WHERE status = 'active' AND expires_at <= $1
-			ORDER BY expires_at LIMIT $2 FOR UPDATE SKIP LOCKED)
-		UPDATE holds h SET status = 'released' FROM batch WHERE h.id = batch.id
-		RETURNING h.id, h.event_id, h.seat_id`, now, limit)
-	if err != nil {
-		return nil, fmt.Errorf("booking/pg: expire holds: %w", err)
-	}
-	defer rows.Close()
-	var out []app.ReleasedHold
-	for rows.Next() {
-		var r app.ReleasedHold
-		if err := rows.Scan(&r.ID, &r.EventID, &r.SeatID); err != nil {
-			return nil, fmt.Errorf("booking/pg: scan released: %w", err)
+func (s *Store) ExpireHoldsBatch(ctx context.Context, now time.Time, limit int) (out []app.ReleasedHold, err error) {
+	err = db.WithTx(ctx, s.pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `/* booking.expire_holds_batch */
+			WITH batch AS (
+				SELECT id FROM holds WHERE status = 'active' AND expires_at <= $1
+				ORDER BY expires_at LIMIT $2 FOR UPDATE SKIP LOCKED)
+			UPDATE holds h SET status = 'released' FROM batch WHERE h.id = batch.id
+			RETURNING h.id, h.event_id, h.seat_id`, now, limit)
+		if err != nil {
+			return fmt.Errorf("booking/pg: expire holds: %w", err)
 		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		out = out[:0]
+		for rows.Next() {
+			var r app.ReleasedHold
+			if err := rows.Scan(&r.ID, &r.EventID, &r.SeatID); err != nil {
+				return fmt.Errorf("booking/pg: scan released: %w", err)
+			}
+			out = append(out, r)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		events := make([]outbox.Event, 0, len(out))
+		for _, h := range out {
+			events = append(events, api.SeatStateChanged{
+				ID: uuid.New(), EventID: h.EventID, SeatID: h.SeatID, State: api.SeatStateFree, HoldID: h.ID, At: now,
+			})
+		}
+		return s.seatOutbox.AppendBatch(ctx, tx, events)
+	})
+	return out, err
 }
 
 // ExpireOrders — pending заказы, у которых хотя бы один hold released → expired.

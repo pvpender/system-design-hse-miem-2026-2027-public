@@ -54,9 +54,6 @@ echo "== Инструменты"
 command -v make >/dev/null 2>&1 && ok "make: $(make --version 2>/dev/null | head -1)" || fail "make не найден"
 command -v git  >/dev/null 2>&1 && ok "git: $(git --version)" || fail "git не найден"
 command -v go   >/dev/null 2>&1 && ok "go (опционально): $(go version)" || warn "go не найден — не обязателен, сборка идёт в Docker"
-for t in kubectl k3d helm; do
-  command -v $t >/dev/null 2>&1 && ok "$t (занятие 5)" || warn "$t не найден: нужен с занятия 5 (brew install k3d helm kubectl), см. soldout/docs/deploy.md"
-done
 command -v k6   >/dev/null 2>&1 && ok "k6 (опционально): $(k6 version 2>/dev/null | head -1)" || warn "k6 не найден — не обязателен, стрельба идёт в контейнере grafana/k6"
 
 echo "== Итог"

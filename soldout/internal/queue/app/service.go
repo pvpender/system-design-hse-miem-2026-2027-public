@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,13 +17,7 @@ import (
 // ErrNotFound — допуск не найден в хранилище.
 var ErrNotFound = errors.New("queue: допуск не найден")
 
-// Store — постоянное хранилище допусков (PostgreSQL, таблица admissions).
-type Store interface {
-	Insert(ctx context.Context, a domain.Admission) error
-	Get(ctx context.Context, token string) (domain.Admission, error)
-}
-
-// Cache — быстрый кэш токенов (Valkey) с TTL.
+// Cache — хранилище токенов допуска (Valkey) с TTL.
 type Cache interface {
 	Set(ctx context.Context, a domain.Admission, ttl time.Duration) error
 	Get(ctx context.Context, token string) (domain.Admission, error)
@@ -32,17 +25,15 @@ type Cache interface {
 
 // Service — реализация api.Service.
 type Service struct {
-	store   Store
 	cache   Cache
 	catalog catalogapi.Service
 	ttl     time.Duration
-	logger  *slog.Logger
 	now     func() time.Time
 }
 
 // New собирает сервис.
-func New(store Store, cache Cache, catalog catalogapi.Service, ttl time.Duration, logger *slog.Logger) *Service {
-	return &Service{store: store, cache: cache, catalog: catalog, ttl: ttl, logger: logger, now: time.Now}
+func New(cache Cache, catalog catalogapi.Service, ttl time.Duration) *Service {
+	return &Service{cache: cache, catalog: catalog, ttl: ttl, now: time.Now}
 }
 
 var _ api.Service = (*Service)(nil)
@@ -56,33 +47,23 @@ func (s *Service) Join(ctx context.Context, eventID, userID uuid.UUID) (api.Admi
 		return api.Admission{}, fmt.Errorf("%w: пустой user_id", api.ErrAdmissionInvalid)
 	}
 	a := domain.NewAdmission(eventID, userID, s.now(), s.ttl)
-	if err := s.store.Insert(ctx, a); err != nil {
-		return api.Admission{}, err
-	}
 	if err := s.cache.Set(ctx, a, s.ttl); err != nil {
-		// кэш — ускорение, не источник истины: деградируем в чтение из PG
-		s.logger.WarnContext(ctx, "queue: не удалось записать токен в кэш", "err", err)
+		return api.Admission{}, err
 	}
 	return a.ToAPI(), nil
 }
 
-// Validate — сначала кэш, при промахе — PostgreSQL.
+// Validate проверяет допуск в Valkey — единственном хранилище допусков.
 func (s *Service) Validate(ctx context.Context, token string, eventID, userID uuid.UUID) error {
 	if token == "" {
 		return api.ErrAdmissionInvalid
 	}
 	a, err := s.cache.Get(ctx, token)
+	if errors.Is(err, ErrNotFound) {
+		return api.ErrAdmissionInvalid
+	}
 	if err != nil {
-		if !errors.Is(err, ErrNotFound) {
-			s.logger.WarnContext(ctx, "queue: ошибка кэша, читаем из БД", "err", err)
-		}
-		a, err = s.store.Get(ctx, token)
-		if errors.Is(err, ErrNotFound) {
-			return api.ErrAdmissionInvalid
-		}
-		if err != nil {
-			return err
-		}
+		return err
 	}
 	if !a.ValidFor(eventID, userID, s.now()) {
 		return api.ErrAdmissionInvalid

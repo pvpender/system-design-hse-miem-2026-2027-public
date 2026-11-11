@@ -167,7 +167,7 @@ func run(cfg config) error {
 		src, ready, lagFn = kc, kc.Ping, kc.Lag
 		proc = app.New(store, sender, kc, m, opts, logger)
 	case "outbox-poll":
-		src = outboxpoll.New(outbox.NewPoller(pool, 200, 200*time.Millisecond), cfg.concurrency)
+		src = outboxpoll.New(outbox.NewPollerFor("order", pool, 200, 200*time.Millisecond), cfg.concurrency)
 		dlq := outboxpoll.LogDLQ{Log: func(ctx context.Context, msg app.Message, cause error, attempts int) {
 			logger.ErrorContext(ctx, "notifier: DLQ (lite, без брокера)", "headers", app.DLQHeaders(msg, cause, attempts), "value", string(msg.Value))
 		}}

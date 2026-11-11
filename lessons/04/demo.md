@@ -114,7 +114,7 @@ FAULT_CRASH_AFTER_COMMIT=order.paid make restore && make pay-demo; make restore 
 
 ## ADR-003 (8 минут)
 
-`docs/adr/ADR-003-event-delivery-and-notifier.md`: таблица A/B/C, решение с обоснованием, known limitations. Вслух про слот репликации: остановить Connect (`docker compose stop connect`), сделать `make checkout`, `make cdc-status` → `wal_behind` растет. Никто не читает слот, WAL копится до заполнения диска.
+`docs/adr/ADR-003-event-delivery-and-notifier.md`: таблица A/B/C, голосование, known limitations. Вслух про слот репликации: остановить Connect (`docker compose stop connect`), сделать `make checkout`, `make cdc-status` → `wal_behind` растет. Никто не читает слот, WAL копится до заполнения диска.
 
 ## ИИ-нить (7 минут)
 

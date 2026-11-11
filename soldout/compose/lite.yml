@@ -10,8 +10,6 @@ services:
   notifier:
     environment:
       NOTIFIER_SOURCE: outbox-poll   # вариант A ADR-003: без Kafka и Connect
-    ports:
-      - "8091:8091"                  # в lite экспортера лага нет, метрики отдает сам notifier (одна реплика)
   k6:
     environment:
       SEATS_PER_EVENT: ${SEED_SEATS_PER_EVENT:-4000}
